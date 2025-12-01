@@ -67,6 +67,22 @@
             display: flex;
             flex-direction: column;
             justify-content: space-between;
+            visibility: hidden; /* Hidden until AR starts */
+        }
+
+        /* Start Screen */
+        #start-screen {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-color: #111;
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            padding: 20px;
+            text-align: center;
         }
 
         /* Interactive elements inside the overlay must re-enable pointer-events */
@@ -130,19 +146,24 @@
             box-shadow: 0 0 8px rgba(0,0,0,0.5);
             transition: width 0.2s, height 0.2s, background-color 0.2s;
         }
-
-        /* Hide "Enter VR" button, we only want AR */
-        .a-enter-vr-button {
-            bottom: 20px !important;
-            right: 20px !important;
-            background: rgba(0,0,0,0.5) !important;
-        }
     </style>
 </head>
 <body class="bg-gray-900 overflow-hidden">
 
-    <!-- WebXR Scene with DOM Overlay enabled -->
+    <!-- Start Screen Overlay -->
+    <div id="start-screen">
+        <h1 class="text-4xl font-bold mb-4 bg-gradient-to-r from-blue-400 to-green-400 bg-clip-text text-transparent">AR Graffiti</h1>
+        <p class="mb-8 text-gray-300 max-w-md">Paint on the real world with friends. <br> Requires camera permissions.</p>
+        <button id="start-ar-btn" class="px-8 py-4 bg-blue-600 rounded-full font-bold text-xl shadow-lg hover:bg-blue-500 transition transform hover:scale-105">
+            Start AR Session
+        </button>
+        <p class="mt-8 text-xs text-gray-500">Works best on Chrome Android or WebXR Viewer (iOS)</p>
+    </div>
+
+    <!-- WebXR Scene -->
+    <!-- vr-mode-ui="enabled: false" hides the default button so we can use our custom start screen -->
     <a-scene 
+        vr-mode-ui="enabled: false"
         webxr="optionalFeatures: hit-test, dom-overlay; overlayElement: #dom-overlay;"
         background="color: #333; transparent: true"
         renderer="antialias: true; colorManagement: true; physicallyCorrectLights: true;">
@@ -206,6 +227,33 @@
     </div>
 
     <script>
+        // --- STARTUP LOGIC ---
+        document.addEventListener('DOMContentLoaded', () => {
+            const startBtn = document.getElementById('start-ar-btn');
+            const startScreen = document.getElementById('start-screen');
+            const overlay = document.getElementById('dom-overlay');
+            const scene = document.querySelector('a-scene');
+
+            startBtn.addEventListener('click', () => {
+                // Request to enter AR mode
+                // This call requires a user gesture (click), which we are inside of.
+                // It triggers the permission prompt.
+                scene.enterVR(); 
+            });
+
+            // Listen for entering AR to switch UI
+            scene.addEventListener('enter-vr', () => {
+                startScreen.style.display = 'none';
+                overlay.style.visibility = 'visible';
+            });
+            
+            // Listen for exit to show start screen again (optional)
+            scene.addEventListener('exit-vr', () => {
+                startScreen.style.display = 'flex';
+                overlay.style.visibility = 'hidden';
+            });
+        });
+
         // --- CONFIGURATION ---
         const COLORS = [
             '#EF4444', '#F97316', '#FACC15', '#22C55E', 
