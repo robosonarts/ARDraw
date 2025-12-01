@@ -22,8 +22,11 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, onSnapshot, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
+        // Set log level to debug for firebase errors
+        setLogLevel('debug');
+        
         // Global Variables
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-ar-painter';
         const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
@@ -60,8 +63,6 @@
                 
             } catch (error) { console.error("Auth error:", error); }
         };
-        // We'll call this inside the main script when the AR session is about to start
-        // to ensure the user ID is available when the drawing system initializes.
     </script>
 
     <style>
@@ -290,23 +291,23 @@
             const startScreen = document.getElementById('start-screen');
             const overlay = document.getElementById('dom-overlay');
             const scene = document.querySelector('a-scene');
-            const mindarComponent = scene.components['mindar-image'];
 
             startBtn.addEventListener('click', async () => {
-                // 1. Authenticate user
-                await window.initFirebase();
-                
-                // 2. Hide UI elements
-                startBtn.disabled = true;
-                startBtn.textContent = 'Starting...';
+                const mindarComponent = scene.components['mindar-image'];
+                let cameraSuccess = false;
 
-                // 3. iOS Camera Fix: Force native camera request
+                // 1. CRITICAL: Start camera request immediately to satisfy iOS/Safari user gesture requirement
                 try {
-                    // This explicitly triggers the camera permission prompt first.
+                    startBtn.disabled = true;
+                    startBtn.textContent = 'Requesting Camera...';
+
+                    // This must be triggered directly by the click/touch event.
                     const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-                    // Stop the tracks immediately, MindAR will handle the stream
+                    // Stop the tracks immediately, MindAR will handle the stream setup later
                     stream.getTracks().forEach(track => track.stop()); 
-                    console.log("Initial camera check successful.");
+                    cameraSuccess = true;
+                    console.log("Camera access granted.");
+
                 } catch (e) {
                     showStartupError(`Camera access denied or failed: ${e.message}. Please ensure your browser has camera permissions.`);
                     startBtn.disabled = false;
@@ -314,15 +315,23 @@
                     return;
                 }
 
-                // 4. Start MindAR AR session
+                if (!cameraSuccess) return;
+
+                // 2. AUTH & INIT: Now that we have the gesture, proceed with Firebase and AR startup
+                startBtn.textContent = 'Initializing AR...';
+                
+                // Init Firebase (will signal the drawing component when ready)
+                await window.initFirebase(); 
+                
                 if (mindarComponent && mindarComponent.start) {
+                    // Start MindAR AR session 
                     await mindarComponent.start();
                     
-                    // 5. Switch UI after successful start
+                    // 3. UI SWITCH: After successful AR start
                     startScreen.style.display = 'none';
                     overlay.style.visibility = 'visible';
                 } else {
-                    showStartupError("MindAR component not found or failed to initialize.");
+                    showStartupError("MindAR component not found or failed to initialize the AR system.");
                     startBtn.disabled = false;
                     startBtn.textContent = 'Start AR Session';
                 }
@@ -675,20 +684,23 @@
         };
 
         window.clearCanvas = () => {
-            if(confirm("Clear ALL graffiti? This will only clear your local view. A full sync clear is not implemented in this version.")) {
+            // Use a custom confirmation message instead of alert/confirm
+            const doClear = window.prompt("Type 'CLEAR' (in all caps) to confirm clearing your local graffiti history (other users' drawings will remain):");
+            
+            if (doClear === 'CLEAR') {
                 const container = document.getElementById('wall-anchor');
-                // Loop through children of the drawing-system entity inside the anchor
                 const drawingEntity = container.querySelector('[drawing-system]');
                 
                 if (drawingEntity) {
                     const object3D = drawingEntity.object3D;
-                    // Note: We only clear the 3D objects added by the component
                     for (let i = object3D.children.length - 1; i >= 0; i--) {
                         if (object3D.children[i].userData.isStroke) {
                             object3D.remove(object3D.children[i]);
                         }
                     }
                 }
+            } else if (doClear !== null) {
+                console.log("Clear canceled.");
             }
         };
 
