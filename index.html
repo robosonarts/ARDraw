@@ -18,53 +18,8 @@
     <!-- FontAwesome for Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
-    <!-- Firebase Imports -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, onSnapshot, query, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // Set log level to debug for firebase errors
-        setLogLevel('debug');
-        
-        // Global Variables
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-ar-painter';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        const authToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-        // Expose Firebase functions globally
-        window.collection = collection;
-        window.addDoc = addDoc;
-        window.onSnapshot = onSnapshot;
-        window.query = query;
-        window.serverTimestamp = serverTimestamp;
-
-        if (Object.keys(firebaseConfig).length > 0) {
-            const app = initializeApp(firebaseConfig);
-            window.db = getFirestore(app);
-            window.auth = getAuth(app);
-        } else {
-            console.warn("Firebase config missing. Drawing will not sync.");
-        }
-
-        window.initFirebase = async () => {
-            if (!window.auth) return;
-            try {
-                if (authToken) await signInWithCustomToken(window.auth, authToken);
-                else await signInAnonymously(window.auth);
-                window.userId = window.auth.currentUser?.uid || crypto.randomUUID();
-                
-                // Set path and enable sync
-                window.DRAWING_COLLECTION_PATH = `/artifacts/${appId}/public/data/drawings`;
-                
-                // Signal component to start listening
-                const scene = document.querySelector('a-scene');
-                if(scene) scene.emit('firebase-ready');
-                
-            } catch (error) { console.error("Auth error:", error); }
-        };
-    </script>
-
+    <!-- Firebase Imports REMOVED: Skipping multiplayer setup for now -->
+    
     <style>
         /* Essential for full-screen AR experience */
         html, body {
@@ -193,7 +148,7 @@
     <!-- Start Screen Overlay -->
     <div id="start-screen">
         <h1 class="text-4xl font-bold mb-4 bg-gradient-to-r from-blue-400 to-green-400 bg-clip-text text-transparent">AR Graffiti</h1>
-        <p class="mb-8 text-gray-300 max-w-md">Paint on the real world with friends. <br> Requires camera and motion sensor access.</p>
+        <p class="mb-8 text-gray-300 max-w-md">Paint on the real world. <br> Requires camera and motion sensor access.</p>
         <button id="start-ar-btn" class="px-8 py-4 bg-blue-600 rounded-full font-bold text-xl shadow-lg hover:bg-blue-500 transition transform hover:scale-105">
             Start AR Session
         </button>
@@ -317,11 +272,10 @@
 
                 if (!cameraSuccess) return;
 
-                // 2. AUTH & INIT: Now that we have the gesture, proceed with Firebase and AR startup
+                // 2. INIT AR: Proceed directly to starting MindAR 
                 startBtn.textContent = 'Initializing AR...';
                 
-                // Init Firebase (will signal the drawing component when ready)
-                await window.initFirebase(); 
+                // Previously: await window.initFirebase(); 
                 
                 if (mindarComponent && mindarComponent.start) {
                     // Start MindAR AR session 
@@ -366,16 +320,13 @@
         AFRAME.registerComponent('drawing-system', {
             init: function () {
                 this.currentStroke = null;
-                this.strokeData = [];
+                this.strokeData = []; // Local stroke data (not used for saving right now)
                 this.lastPoint = null;
                 this.reticlePosition = new THREE.Vector2(0, 0); // Center of screen
                 this.raycaster = new THREE.Raycaster();
                 
-                // Firestore Listener
-                this.el.sceneEl.addEventListener('firebase-ready', () => {
-                   this.setupFirestore();
-                });
-
+                // Firestore Listener REMOVED
+                
                 // Input Handling
                 const btn = document.getElementById('draw-btn');
                 
@@ -398,31 +349,9 @@
                 window.addEventListener('touchcancel', end); 
             },
 
-            setupFirestore: function() {
-                if(!window.db || !window.DRAWING_COLLECTION_PATH) return;
-                
-                const q = window.query(window.collection(window.db, window.DRAWING_COLLECTION_PATH));
-                this.unsubscribe = window.onSnapshot(q, (snapshot) => {
-                    snapshot.docChanges().forEach((change) => {
-                        if (change.type === "added") {
-                            const data = change.doc.data();
-                            // Don't redraw our own strokes immediately to avoid duplication 
-                            // (We're relying on the tick() loop for local drawing)
-                            if (data.userId !== window.userId) {
-                                this.renderRemoteStroke(data);
-                            }
-                        }
-                    });
-                }, (error) => {
-                    console.error("Firestore sync error:", error);
-                });
-            },
+            // setupFirestore REMOVED
 
-            remove: function() {
-                if (this.unsubscribe) {
-                    this.unsubscribe();
-                }
-            },
+            // remove REMOVED (no cleanup needed without firestore listener)
 
             startAction: function () {
                 STATE.isDrawing = true;
@@ -443,26 +372,7 @@
                 document.getElementById('draw-btn').style.transform = "scale(1)";
                 document.getElementById('draw-btn').style.filter = "brightness(1)";
 
-                // Save to Firestore
-                if (window.db && window.DRAWING_COLLECTION_PATH && this.strokeData.length > 0 && STATE.tool !== 'eraser') {
-                    // Compress data slightly (array of arrays)
-                    const segments = this.strokeData.map(v => [
-                        Number(v.x.toFixed(3)), 
-                        Number(v.y.toFixed(3)), 
-                        Number(v.z.toFixed(3))
-                    ]);
-
-                    window.addDoc(window.collection(window.db, window.DRAWING_COLLECTION_PATH), {
-                        userId: window.userId,
-                        color: STATE.color,
-                        size: STATE.size,
-                        tool: STATE.tool,
-                        points: segments,
-                        timestamp: window.serverTimestamp()
-                    }).catch(error => {
-                        console.error("Error saving drawing to Firestore:", error);
-                    });
-                }
+                // Save to Firestore logic REMOVED
             },
 
             tick: function (time, deltaTime) {
@@ -606,23 +516,7 @@
                 }
             },
 
-            renderRemoteStroke: function(data) {
-                if(!data.points || data.points.length < 2) return;
-                
-                // Reconstruct Vector3s
-                const points = data.points.map(p => new THREE.Vector3(p[0], p[1], p[2]));
-                
-                if (data.tool === 'brush') {
-                    for(let i=0; i<points.length-1; i++) {
-                        // Pass the previous point as 'from' for the cylinder creation
-                        this.drawBrushSegment(points[i], points[i+1], data.color, data.size);
-                    }
-                } else if (data.tool === 'spray') {
-                    points.forEach(p => {
-                        this.drawSprayParticles(p, data.color, data.size);
-                    });
-                }
-            }
+            // renderRemoteStroke REMOVED
         });
 
         // --- UI LOGIC ---
@@ -685,7 +579,7 @@
 
         window.clearCanvas = () => {
             // Use a custom confirmation message instead of alert/confirm
-            const doClear = window.prompt("Type 'CLEAR' (in all caps) to confirm clearing your local graffiti history (other users' drawings will remain):");
+            const doClear = window.prompt("Type 'CLEAR' (in all caps) to confirm clearing your local graffiti:");
             
             if (doClear === 'CLEAR') {
                 const container = document.getElementById('wall-anchor');
