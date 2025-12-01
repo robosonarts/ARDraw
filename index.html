@@ -2,512 +2,522 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>AR Studio Wall Painter</title>
+    <title>AR Graffiti Studio</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-
-    <!-- Tailwind CSS (for quick styling) -->
+    
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <!-- A-Frame (3D/AR Framework) -->
+    <!-- A-Frame (3D Framework) -->
     <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
 
-    <!-- MindAR World Tracking (for stable world-space positioning) -->
-    <!-- NOTE: We use MindAR's world tracking to handle the camera initialization and AR setup -->
-    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
-    <!-- Firebase Imports (Auth and Firestore) -->
+    <!-- Firebase Imports -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, addDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // IMPORTANT: Global variables provided by the environment
+        // Global Variables
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-ar-painter';
         const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
         const authToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-        // 1. Initialize Firebase
         if (Object.keys(firebaseConfig).length > 0) {
             const app = initializeApp(firebaseConfig);
             window.db = getFirestore(app);
             window.auth = getAuth(app);
-            // setLogLevel('debug'); // Uncomment for debugging
-        } else {
-            console.error("Firebase configuration missing.");
+            
+            // Expose Firestore functions to global scope for A-Frame component
+            window.collection = collection;
+            window.addDoc = addDoc;
+            window.onSnapshot = onSnapshot;
+            window.query = query;
+            window.serverTimestamp = serverTimestamp;
         }
 
-        // 2. Handle Authentication
         window.initFirebase = async () => {
             if (!window.auth) return;
             try {
-                if (authToken) {
-                    await signInWithCustomToken(window.auth, authToken);
-                } else {
-                    await signInAnonymously(window.auth);
-                }
-
+                if (authToken) await signInWithCustomToken(window.auth, authToken);
+                else await signInAnonymously(window.auth);
                 window.userId = window.auth.currentUser?.uid || crypto.randomUUID();
-                console.log("Firebase Auth complete. User ID:", window.userId);
-
-                // 3. Set up Firestore references and start drawing system
+                
+                // Set path and enable sync
                 window.DRAWING_COLLECTION_PATH = `/artifacts/${appId}/public/data/drawings`;
-                document.querySelector('a-scene').setAttribute('drawing-system', 'enabled: true');
-
-            } catch (error) {
-                console.error("Firebase Auth or Init error:", error);
-            }
+                
+                // Signal component to start listening
+                const scene = document.querySelector('a-scene');
+                if(scene) scene.emit('firebase-ready');
+                
+            } catch (error) { console.error("Auth error:", error); }
         };
-
-        // Run authentication when the script loads
         window.initFirebase();
     </script>
 
     <style>
-        /* Essential for full-screen AR experience */
-        html, body {
-            width: 100%;
-            height: 100%;
-            margin: 0;
-            overflow: hidden;
-            font-family: 'Inter', sans-serif;
-        }
-
-        /* A-Frame Scene (must be visible and full-screen) */
-        #ar-scene {
-            width: 100%;
-            height: 100%;
-        }
-
-        /* Control Panel (UI) */
-        #controls {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            width: 100%;
-            background: rgba(0, 0, 0, 0.7);
-            padding: 10px;
-            z-index: 100;
+        /* DOM Overlay allows UI to sit on top of the WebXR view */
+        #dom-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; /* Let touches pass through to canvas by default */
+            z-index: 10;
             display: flex;
-            flex-wrap: wrap;
-            justify-content: space-around;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        /* Interactive elements inside the overlay must re-enable pointer-events */
+        .ui-element {
+            pointer-events: auto;
+        }
+
+        /* Tool Buttons */
+        .tool-btn {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            background: rgba(20, 20, 20, 0.8);
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            color: white;
+            display: flex;
             align-items: center;
-            backdrop-filter: blur(5px);
-            border-top-left-radius: 12px;
-            border-top-right-radius: 12px;
-            box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.3);
+            justify-content: center;
+            font-size: 20px;
+            transition: all 0.2s;
+            margin-bottom: 8px;
         }
-
-        .color-button {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            border: 3px solid transparent;
-            cursor: pointer;
-            transition: transform 0.1s, border-color 0.2s;
-            margin: 4px;
-        }
-
-        .color-button.selected {
-            border-color: #3B82F6; /* Tailwind blue-500 */
+        .tool-btn.active {
+            background: #3B82F6;
+            border-color: white;
             transform: scale(1.1);
-            box-shadow: 0 0 10px rgba(59, 130, 246, 0.8);
+        }
+
+        /* Color Buttons */
+        .color-btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border: 2px solid white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            margin: 0 6px;
+            transform: scale(1);
+            transition: transform 0.2s;
+        }
+        .color-btn.active {
+            transform: scale(1.3);
+            border-color: #3B82F6;
         }
 
         /* Main Draw Button */
-        #draw-button {
-            padding: 15px 25px;
-            font-size: 18px;
-            font-weight: bold;
-            border-radius: 12px;
-            transition: background-color 0.1s, transform 0.1s, box-shadow 0.2s;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
-            touch-action: manipulation; /* Important for mobile responsiveness */
+        #draw-btn {
+            background: linear-gradient(135deg, #10B981 0%, #059669 100%);
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
         }
-
-        /* Reticle for aiming */
+        #draw-btn:active {
+            transform: scale(0.95);
+        }
+        
         #reticle {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
+            position: absolute;
+            top: 50%; left: 50%;
+            width: 12px; height: 12px;
             border: 2px solid white;
+            border-radius: 50%;
             transform: translate(-50%, -50%);
-            z-index: 90;
-            opacity: 0.8;
-            pointer-events: none;
-            box-shadow: 0 0 5px white;
+            box-shadow: 0 0 8px rgba(0,0,0,0.5);
+            transition: width 0.2s, height 0.2s, background-color 0.2s;
         }
 
-        /* Start Screen Overlay */
-        #start-screen {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0, 0, 0, 0.95);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            flex-direction: column;
-            z-index: 200;
-            color: white;
-            text-align: center;
-            padding: 20px;
-        }
-        #start-button {
-            padding: 15px 30px;
-            font-size: 20px;
-            background: #10B981; /* Tailwind emerald-500 */
-            color: white;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            margin-top: 20px;
-            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
-            transition: background 0.3s, transform 0.1s;
+        /* Hide "Enter VR" button, we only want AR */
+        .a-enter-vr-button {
+            bottom: 20px !important;
+            right: 20px !important;
+            background: rgba(0,0,0,0.5) !important;
         }
     </style>
 </head>
+<body class="bg-gray-900 overflow-hidden">
 
-<body>
-
-    <!-- Start Screen Overlay -->
-    <div id="start-screen">
-        <h1 class="text-3xl font-bold mb-4">AR Studio Wall Painter</h1>
-        <p class="text-lg mb-6">Point your camera at a wall to begin drawing. The drawing position is based on the center of your screen.</p>
-        <p class="text-sm mb-8">This experience requires camera access and is shared in real-time with other users!</p>
-        <button id="start-button">Start AR Experience</button>
-    </div>
-
-    <!-- The Aiming Reticle -->
-    <div id="reticle" style="background-color: white;"></div>
-
-    <!-- The A-Frame / AR Scene -->
-    <!-- We use mindar-image (which supports world tracking) for reliable mobile camera access -->
+    <!-- WebXR Scene with DOM Overlay enabled -->
     <a-scene 
-        id="ar-scene"
-        mindar-image="
-            imageTargetSrc: none; 
-            uiLoading: no; 
-            uiScanning: no; 
-            maxCanvasSize: 640;
-            facingMode: environment;
-            autoStart: false;" 
-        color-space="sRGB" 
-        renderer="antialias: true, logarithmicDepthBuffer: true, colorManagement: true, physicallyCorrectLights: true" 
-        vr-mode-ui="enabled: false" 
-        device-orientation-permission-ui="enabled: false">
+        webxr="optionalFeatures: hit-test, dom-overlay; overlayElement: #dom-overlay;"
+        background="color: #333; transparent: true"
+        renderer="antialias: true; colorManagement: true; physicallyCorrectLights: true;">
 
-        <!-- The camera will automatically track the world position -->
-        <a-camera position="0 0 0" look-controls="enabled: true"></a-camera>
+        <a-camera position="0 1.6 0" look-controls="enabled: true"></a-camera>
+        
+        <!-- The container for all drawings -->
+        <a-entity id="drawing-container" drawing-system></a-entity>
 
-        <!-- The anchor entity where all drawings will be attached (acts as the virtual wall) -->
-        <a-entity mindar-world="anchor: true;" id="wall-anchor">
-            <!-- This is where the custom component runs the drawing and syncs data -->
-            <a-entity drawing-system="enabled: false"></a-entity>
-        </a-entity>
+        <!-- Lighting for the spray particles -->
+        <a-light type="ambient" color="#BBB"></a-light>
+        <a-light type="directional" position="-1 2 1" intensity="0.5"></a-light>
     </a-scene>
 
-    <!-- UI Controls -->
-    <div id="controls">
-        <!-- Color Palette -->
-        <div class="flex items-center space-x-2 p-2">
-            <button class="color-button selected" style="background-color: #EF4444;" data-color="#EF4444" data-name="red"></button>
-            <button class="color-button" style="background-color: #3B82F6;" data-color="#3B82F6" data-name="blue"></button>
-            <button class="color-button" style="background-color: #FACC15;" data-color="#FACC15" data-name="yellow"></button>
-            <button class="color-button" style="background-color: #000000;" data-color="#000000" data-name="black"></button>
-            <button class="color-button" style="background-color: #FFFFFF; border: 1px solid #ccc;" data-color="#FFFFFF" data-name="white"></button>
+    <!-- UI Overlay (Visible in AR) -->
+    <div id="dom-overlay">
+        
+        <!-- Top Bar: Tools -->
+        <div class="ui-element p-4 flex justify-between items-start w-full">
+            <div class="flex flex-col">
+                <button class="tool-btn active" id="tool-brush" onclick="setTool('brush')">
+                    <i class="fas fa-paint-brush"></i>
+                </button>
+                <button class="tool-btn" id="tool-spray" onclick="setTool('spray')">
+                    <i class="fas fa-spray-can"></i>
+                </button>
+                <button class="tool-btn" id="tool-eraser" onclick="setTool('eraser')">
+                    <i class="fas fa-eraser"></i>
+                </button>
+            </div>
+
+            <div class="flex flex-col items-end">
+                <button class="tool-btn bg-red-500 hover:bg-red-600 border-red-400" onclick="clearCanvas()">
+                    <i class="fas fa-trash"></i>
+                </button>
+                
+                <!-- Size Slider -->
+                <div class="mt-4 bg-black/50 p-2 rounded-lg backdrop-blur-sm">
+                    <input type="range" id="size-slider" min="0.01" max="0.1" step="0.01" value="0.02" 
+                           class="w-32 h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer">
+                </div>
+            </div>
         </div>
 
-        <!-- Brush Size Slider -->
-        <div class="flex flex-col items-center p-2">
-            <label for="size-slider" class="text-white text-xs mb-1">Brush Size</label>
-            <input type="range" id="size-slider" min="0.005" max="0.05" step="0.005" value="0.015" class="w-24">
-        </div>
+        <!-- Center Reticle -->
+        <div id="reticle"></div>
 
-        <!-- Draw Button -->
-        <button id="draw-button" class="bg-gray-400 text-white">Hold to Draw</button>
+        <!-- Bottom Bar: Colors & Draw Button -->
+        <div class="ui-element w-full p-6 flex flex-col items-center pb-8" style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);">
+            
+            <!-- Colors -->
+            <div class="flex mb-6 overflow-x-auto pb-2 space-x-2" id="color-palette">
+                <!-- Generated by JS -->
+            </div>
+
+            <!-- Draw Button -->
+            <button id="draw-btn" class="w-full max-w-xs py-4 rounded-xl text-white font-bold text-xl tracking-wide select-none touch-manipulation">
+                HOLD TO PAINT
+            </button>
+        </div>
     </div>
 
     <script>
-        // --- A-FRAME DRAWING SYSTEM COMPONENT ---
+        // --- CONFIGURATION ---
+        const COLORS = [
+            '#EF4444', '#F97316', '#FACC15', '#22C55E', 
+            '#3B82F6', '#A855F7', '#EC4899', '#FFFFFF', '#000000'
+        ];
+        
+        const STATE = {
+            isDrawing: false,
+            color: COLORS[0],
+            size: 0.02,
+            tool: 'brush', // brush, spray, eraser
+            userId: null
+        };
+
+        // --- DRAWING SYSTEM COMPONENT ---
         AFRAME.registerComponent('drawing-system', {
-            schema: {
-                enabled: { type: 'boolean', default: false },
-                color: { type: 'string', default: '#EF4444' }, // Red (default)
-                size: { type: 'number', default: 0.015 }, // Medium size
-            },
-
             init: function () {
-                this.isDrawing = false;
-                this.currentLine = null; // THREE.Line object for the current stroke
-                this.drawingData = []; // Array of {from, to, color, size} for the current line
-                this.lastCameraPos = new THREE.Vector3(); // Last known camera position
-                this.reticle = document.getElementById('reticle');
-
-                // --- 1. Firestore Realtime Listener ---
-                if (window.db && window.DRAWING_COLLECTION_PATH) {
-                    const q = query(collection(window.db, window.DRAWING_COLLECTION_PATH));
-                    this.unsubscribe = onSnapshot(q, (snapshot) => {
-                        snapshot.docChanges().forEach((change) => {
-                            const data = change.doc.data();
-                            if (change.type === "added" && data.segments) {
-                                // Draw a new line received from the database
-                                this.drawRemoteLine(data.segments, data.color, data.size);
-                            }
-                            // Note: We currently only sync additions, not updates or deletions.
-                        });
-                        console.log("Firestore sync complete.");
-                    }, (error) => {
-                        console.error("Firestore Listener Error:", error);
-                    });
-                }
-
-                // Event listener to start drawing (on touch/mouse down)
-                this.startDraw = this.startDraw.bind(this);
-                this.stopDraw = this.stopDraw.bind(this);
-
-                const drawButton = document.getElementById('draw-button');
-                drawButton.addEventListener('mousedown', this.startDraw);
-                drawButton.addEventListener('touchstart', this.startDraw);
-                drawButton.addEventListener('mouseup', this.stopDraw);
-                drawButton.addEventListener('touchend', this.stopDraw);
-                drawButton.addEventListener('touchcancel', this.stopDraw); 
-            },
-
-            remove: function() {
-                // Clean up Firestore listener on component removal
-                if (this.unsubscribe) {
-                    this.unsubscribe();
-                }
-            },
-
-            startDraw: function (e) {
-                if (!this.data.enabled) return;
-                // Prevent multi-touch drawing
-                if (e.touches && e.touches.length > 1) return; 
-
-                this.isDrawing = true;
-                this.drawingData = [];
-
-                // Change button style to indicate drawing
-                const drawButton = document.getElementById('draw-button');
-                drawButton.classList.remove('bg-gray-400', 'text-white');
-                drawButton.classList.add('bg-red-600', 'text-white');
-
-                // Get initial position and start the line
-                const camera = this.el.sceneEl.camera;
-                const intersectionPoint = this.getDrawingPosition(camera);
-                this.lastCameraPos.copy(intersectionPoint);
-            },
-
-            stopDraw: function () {
-                if (!this.isDrawing) return;
-                this.isDrawing = false;
-
-                // Change button style back
-                const drawButton = document.getElementById('draw-button');
-                drawButton.classList.add('bg-gray-400', 'text-white');
-                drawButton.classList.remove('bg-red-600', 'text-white');
-
-                // --- 2. Save Data to Firestore ---
-                if (window.db && window.DRAWING_COLLECTION_PATH && this.drawingData.length > 0) {
-                    const segmentsToSave = this.drawingData.map(d => ({
-                        f: [d.from.x, d.from.y, d.from.z], // 'f' for from
-                        t: [d.to.x, d.to.y, d.to.z]       // 't' for to
-                    }));
-
-                    try {
-                        addDoc(collection(window.db, window.DRAWING_COLLECTION_PATH), {
-                            userId: window.userId,
-                            color: this.data.color,
-                            size: this.data.size,
-                            segments: segmentsToSave,
-                            timestamp: serverTimestamp()
-                        }).then(() => {
-                            console.log("Line segment saved successfully.");
-                        });
-                    } catch (e) {
-                        console.error("Error adding document: ", e);
-                    }
-                }
-
-                // Clear the current line state for the next stroke
-                this.currentLine = null;
-                this.drawingData = [];
-            },
-
-            // Calculates the 3D point where the center of the camera is aiming
-            getDrawingPosition: function (camera) {
-                const raycaster = new THREE.Raycaster();
-                const mouse = new THREE.Vector2(0, 0); // Center of screen is (0, 0) in normalized device coordinates
-
-                raycaster.setFromCamera(mouse, camera);
-
-                // Use an arbitrary plane fixed in front of the camera (e.g., 2 units away)
-                // This creates the illusion of drawing on a distant wall.
-                const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -2); 
-                const intersectionPoint = new THREE.Vector3();
-
-                raycaster.ray.intersectPlane(plane, intersectionPoint);
-                return intersectionPoint;
-            },
-
-            // Draws the received line on the AR scene
-            drawRemoteLine: function (segments, color, size) {
-                if (segments.length === 0) return;
-
-                const geometry = new THREE.BufferGeometry();
-                const material = new THREE.MeshBasicMaterial({ color: new THREE.Color(color) });
-
-                const points = [];
-                segments.forEach(seg => {
-                    const from = new THREE.Vector3(seg.f[0], seg.f[1], seg.f[2]);
-                    const to = new THREE.Vector3(seg.t[0], seg.t[1], seg.t[2]);
-                    points.push(from, to); // Add two points for a segment
+                this.currentStroke = null;
+                this.strokeData = [];
+                this.lastPoint = null;
+                this.raycaster = new THREE.Raycaster();
+                
+                // Firestore Listener
+                this.el.sceneEl.addEventListener('firebase-ready', () => {
+                   this.setupFirestore();
                 });
 
-                geometry.setFromPoints(points);
+                // Input Handling
+                const btn = document.getElementById('draw-btn');
+                
+                const start = (e) => { 
+                    e.preventDefault(); 
+                    if(e.touches && e.touches.length > 1) return;
+                    this.startAction(); 
+                };
+                const end = (e) => { 
+                    e.preventDefault(); 
+                    this.endAction(); 
+                };
 
-                // Use LineSegments and apply size via LineMaterial (approximation here, for simplicity, using a cylinder mesh is better)
-                // For performance, we'll use a simple THREE.LineSegments, but scale its thickness
-                const line = new THREE.LineSegments(geometry, material);
+                btn.addEventListener('mousedown', start);
+                btn.addEventListener('touchstart', start);
+                
+                window.addEventListener('mouseup', end);
+                window.addEventListener('touchend', end);
+            },
 
-                // Add to the scene's anchor point so it stays fixed in the world
-                document.querySelector('#wall-anchor').object3D.add(line); 
-                line.userData.segments = segments; // Store the raw data
-                line.userData.size = size;
-                line.userData.color = color;
+            setupFirestore: function() {
+                if(!window.db || !window.DRAWING_COLLECTION_PATH) return;
+                
+                // Use window.* versions since the module scope isn't shared
+                const q = window.query(window.collection(window.db, window.DRAWING_COLLECTION_PATH));
+                window.onSnapshot(q, (snapshot) => {
+                    snapshot.docChanges().forEach((change) => {
+                        if (change.type === "added") {
+                            const data = change.doc.data();
+                            // Don't redraw our own strokes immediately to avoid duplication 
+                            // (In a prod app you'd handle local/remote IDs better)
+                            if (data.userId !== window.userId) {
+                                this.renderRemoteStroke(data);
+                            }
+                        }
+                    });
+                });
+            },
 
-                // Simple size approximation using Scale
-                line.scale.set(size * 10, size * 10, size * 10);
+            startAction: function () {
+                STATE.isDrawing = true;
+                this.strokeData = [];
+                this.lastPoint = null;
+                
+                // Visual Feedback
+                document.getElementById('draw-btn').style.transform = "scale(0.95)";
+                document.getElementById('draw-btn').style.filter = "brightness(0.9)";
+            },
+
+            endAction: function () {
+                if (!STATE.isDrawing) return;
+                STATE.isDrawing = false;
+                this.currentStroke = null;
+                
+                // Reset Button
+                document.getElementById('draw-btn').style.transform = "scale(1)";
+                document.getElementById('draw-btn').style.filter = "brightness(1)";
+
+                // Save to Firestore
+                if (window.db && window.DRAWING_COLLECTION_PATH && this.strokeData.length > 0 && STATE.tool !== 'eraser') {
+                    // Compress data slightly (array of arrays)
+                    const segments = this.strokeData.map(v => [
+                        Number(v.x.toFixed(3)), 
+                        Number(v.y.toFixed(3)), 
+                        Number(v.z.toFixed(3))
+                    ]);
+
+                    // Use global window.addDoc and window.collection
+                    window.addDoc(window.collection(window.db, window.DRAWING_COLLECTION_PATH), {
+                        userId: window.userId,
+                        color: STATE.color,
+                        size: STATE.size,
+                        tool: STATE.tool,
+                        points: segments,
+                        timestamp: window.serverTimestamp()
+                    });
+                }
             },
 
             tick: function (time, deltaTime) {
-                if (!this.data.enabled || !this.isDrawing) return;
+                if (!STATE.isDrawing) return;
 
                 const camera = this.el.sceneEl.camera;
                 if (!camera) return;
 
-                const newCameraPos = this.getDrawingPosition(camera);
+                // 1. Get Hit Point (2 meters in front of camera)
+                const point = this.getHitPoint(camera);
 
-                // Only draw a segment if the camera has moved significantly
-                const minDistance = 0.01 * this.data.size; // Movement threshold scales with brush size
-                if (newCameraPos.distanceTo(this.lastCameraPos) > minDistance) {
-                    // Create a new segment
-                    const segment = {
-                        from: this.lastCameraPos.clone(),
-                        to: newCameraPos.clone(),
-                        color: this.data.color,
-                        size: this.data.size
-                    };
+                // 2. Handle Eraser
+                if (STATE.tool === 'eraser') {
+                    this.eraseAt(point);
+                    return;
+                }
 
-                    this.drawingData.push(segment);
+                // 3. Handle Drawing (Brush or Spray)
+                if (this.lastPoint && point.distanceTo(this.lastPoint) < (STATE.size * 0.5)) {
+                    return; // Too close to last point
+                }
 
-                    // Visualize the segment immediately
-                    this.drawLocalSegment(segment);
+                if (STATE.tool === 'brush') {
+                    this.drawBrushSegment(this.lastPoint || point, point, STATE.color, STATE.size);
+                } else if (STATE.tool === 'spray') {
+                    this.drawSprayParticles(point, STATE.color, STATE.size);
+                }
 
-                    // Update the last position for the next tick
-                    this.lastCameraPos.copy(newCameraPos);
+                this.strokeData.push(point.clone());
+                this.lastPoint = point.clone();
+            },
+
+            getHitPoint: function(camera) {
+                // Creates a virtual drawing plane 1.5m away
+                const direction = new THREE.Vector3();
+                camera.getWorldDirection(direction);
+                direction.multiplyScalar(1.5); // Distance from phone
+                return camera.position.clone().add(direction);
+            },
+
+            drawBrushSegment: function(from, to, color, size) {
+                // Using cylinders for smoother thick lines than LineSegments
+                const distance = from.distanceTo(to);
+                if (distance === 0) return;
+
+                const geometry = new THREE.CylinderGeometry(size/2, size/2, distance, 6);
+                const material = new THREE.MeshStandardMaterial({ 
+                    color: color, 
+                    roughness: 1, 
+                    flatShading: true 
+                });
+                
+                const cylinder = new THREE.Mesh(geometry, material);
+                
+                // Align cylinder to the two points
+                const midPoint = new THREE.Vector3().addVectors(from, to).multiplyScalar(0.5);
+                cylinder.position.copy(midPoint);
+                cylinder.lookAt(to);
+                cylinder.rotateX(Math.PI / 2); // Cylinder creates pointing up, rotate to face target
+                
+                // Add sphere for joint smoothing
+                const jointGeo = new THREE.SphereGeometry(size/2, 6, 6);
+                const joint = new THREE.Mesh(jointGeo, material);
+                joint.position.copy(from);
+
+                const group = new THREE.Group();
+                group.add(cylinder);
+                group.add(joint);
+                
+                // Tag for eraser
+                group.userData.isStroke = true;
+                
+                this.el.object3D.add(group);
+            },
+
+            drawSprayParticles: function(center, color, size) {
+                const particleCount = 4;
+                const sprayRadius = size * 3;
+                
+                const geometry = new THREE.PlaneGeometry(size/2, size/2);
+                const material = new THREE.MeshBasicMaterial({ 
+                    color: color, 
+                    transparent: true, 
+                    opacity: 0.8,
+                    side: THREE.DoubleSide
+                });
+
+                for(let i=0; i<particleCount; i++) {
+                    const mesh = new THREE.Mesh(geometry, material);
+                    
+                    // Random offset within sphere
+                    const offset = new THREE.Vector3(
+                        (Math.random() - 0.5) * sprayRadius,
+                        (Math.random() - 0.5) * sprayRadius,
+                        (Math.random() - 0.5) * sprayRadius
+                    );
+                    
+                    mesh.position.copy(center).add(offset);
+                    mesh.lookAt(this.el.sceneEl.camera.position); // Billboard effect
+                    mesh.userData.isStroke = true;
+                    
+                    this.el.object3D.add(mesh);
                 }
             },
 
-            // Function to draw one line segment locally using THREE.js
-            drawLocalSegment: function (segment) {
-                const points = [segment.from, segment.to];
-                const geometry = new THREE.BufferGeometry().setFromPoints(points);
-                const material = new THREE.LineBasicMaterial({ 
-                    color: segment.color, 
-                    linewidth: segment.size * 1000, // Line width is difficult in THREE.js without LineMaterial, this is a proxy
-                    linecap: 'round', // Ignored by LineBasicMaterial, but good intent
-                    linejoin: 'round'
-                });
+            eraseAt: function(point) {
+                // Simple distance-based erasure
+                const eraserRadius = STATE.size * 3;
+                const children = this.el.object3D.children;
+                
+                // Iterate backwards to safely remove
+                for (let i = children.length - 1; i >= 0; i--) {
+                    const child = children[i];
+                    if (child.userData.isStroke) {
+                        // Check distance to the group or mesh
+                        if (child.position.distanceTo(point) < eraserRadius) {
+                            this.el.object3D.remove(child);
+                            // Also try to remove detailed children if it's a group
+                        } else if (child.children.length > 0) {
+                             // Check inner children (like the cylinder in the group)
+                             if (child.children[0].position.distanceTo(point) < eraserRadius || 
+                                 child.position.distanceTo(point) < eraserRadius) {
+                                 this.el.object3D.remove(child);
+                             }
+                        }
+                    }
+                }
+            },
 
-                // Create a basic line
-                const line = new THREE.Line(geometry, material);
-
-                // Create a simple sphere at the 'to' point to simulate brush size/end cap
-                const sphereGeometry = new THREE.SphereGeometry(segment.size / 2, 8, 8);
-                const sphereMaterial = new THREE.MeshBasicMaterial({ color: segment.color });
-                const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
-                sphere.position.copy(segment.to);
-
-                // Add to the scene's anchor point
-                document.querySelector('#wall-anchor').object3D.add(line);
-                document.querySelector('#wall-anchor').object3D.add(sphere);
+            renderRemoteStroke: function(data) {
+                if(!data.points || data.points.length < 2) return;
+                
+                // Reconstruct Vector3s
+                const points = data.points.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+                
+                if (data.tool === 'brush') {
+                    for(let i=0; i<points.length-1; i++) {
+                        this.drawBrushSegment(points[i], points[i+1], data.color, data.size);
+                    }
+                } else if (data.tool === 'spray') {
+                    points.forEach(p => {
+                        this.drawSprayParticles(p, data.color, data.size);
+                    });
+                }
             }
         });
 
+        // --- UI LOGIC ---
 
-        // --- UI & Initialization Logic ---
+        function initUI() {
+            // Generate Color Palette
+            const palette = document.getElementById('color-palette');
+            COLORS.forEach((color, index) => {
+                const btn = document.createElement('button');
+                btn.className = `color-btn ${index === 0 ? 'active' : ''}`;
+                btn.style.backgroundColor = color;
+                btn.onclick = () => {
+                    STATE.color = color;
+                    document.getElementById('reticle').style.borderColor = color;
+                    document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                };
+                palette.appendChild(btn);
+            });
 
-        document.addEventListener('DOMContentLoaded', () => {
-            const startButton = document.getElementById('start-button');
-            const startScreen = document.getElementById('start-screen');
-            const sceneEl = document.querySelector('a-scene');
-            const drawButton = document.getElementById('draw-button');
-            const colorButtons = document.querySelectorAll('.color-button');
-            const sizeSlider = document.getElementById('size-slider');
-            const drawingSystem = sceneEl.components['drawing-system'];
+            // Size Slider
+            document.getElementById('size-slider').addEventListener('input', (e) => {
+                STATE.size = parseFloat(e.target.value);
+                const px = 10 + (STATE.size * 500);
+                const reticle = document.getElementById('reticle');
+                reticle.style.width = `${px}px`;
+                reticle.style.height = `${px}px`;
+            });
+        }
 
-            const mindarComponent = sceneEl.components['mindar-image'];
+        window.setTool = (toolName) => {
+            STATE.tool = toolName;
+            
+            // Update UI
+            document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(`tool-${toolName}`).classList.add('active');
 
-            // 1. Start AR Experience
-            startButton.addEventListener('click', async () => {
-                startScreen.style.display = 'none';
+            // Update Reticle Style
+            const reticle = document.getElementById('reticle');
+            if (toolName === 'eraser') {
+                reticle.style.borderStyle = 'dashed';
+                reticle.style.borderColor = 'white';
+            } else if (toolName === 'spray') {
+                reticle.style.borderStyle = 'dotted';
+                reticle.style.borderColor = STATE.color;
+            } else {
+                reticle.style.borderStyle = 'solid';
+                reticle.style.borderColor = STATE.color;
+            }
+        };
 
-                try {
-                    // Force native camera request for iOS stability (as we learned)
-                    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-                    stream.getTracks().forEach(track => track.stop()); 
-
-                    // Start MindAR world tracking and enable drawing system
-                    if (mindarComponent && mindarComponent.start) {
-                        await mindarComponent.start();
-                        drawingSystem.data.enabled = true;
-                        console.log("AR experience started.");
-                    }
-
-                } catch (err) {
-                    console.error("Camera/AR Initialization Failed:", err);
-                    alert("AR Error: Camera access failed. Please ensure permissions are granted.");
+        window.clearCanvas = () => {
+            if(confirm("Clear your drawing?")) {
+                const container = document.getElementById('drawing-container');
+                while(container.object3D.children.length > 0){ 
+                    container.object3D.remove(container.object3D.children[0]); 
                 }
-            });
+            }
+        };
 
-            // 2. Color Selection
-            colorButtons.forEach(button => {
-                button.addEventListener('click', () => {
-                    // Update component state
-                    const newColor = button.getAttribute('data-color');
-                    drawingSystem.data.color = newColor;
-                    drawingSystem.el.setAttribute('drawing-system', 'color', newColor);
+        // Initialize
+        initUI();
 
-                    // Update reticle color
-                    document.getElementById('reticle').style.backgroundColor = newColor;
-
-                    // Update UI selection
-                    colorButtons.forEach(btn => btn.classList.remove('selected'));
-                    button.classList.add('selected');
-                });
-            });
-
-            // 3. Size Slider
-            sizeSlider.addEventListener('input', (e) => {
-                const newSize = parseFloat(e.target.value);
-                drawingSystem.data.size = newSize;
-                drawingSystem.el.setAttribute('drawing-system', 'size', newSize);
-
-                // Update reticle size to match
-                const reticleSize = 10 + (newSize / 0.05) * 10; // Simple scaling
-                document.getElementById('reticle').style.width = `${reticleSize}px`;
-                document.getElementById('reticle').style.height = `${reticleSize}px`;
-            });
-
-            // Initial reticle setup
-            document.getElementById('reticle').style.backgroundColor = drawingSystem.data.color;
-            sizeSlider.dispatchEvent(new Event('input')); // Trigger initial size update
-        });
     </script>
 </body>
 </html>
