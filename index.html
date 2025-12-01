@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>AR Graffiti Studio</title>
+    <title>AR Graffiti Studio (WebXR)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
 
@@ -10,15 +10,13 @@
     <script src="https://cdn.tailwindcss.com"></script>
 
     <!-- A-Frame (3D/AR Framework) -->
+    <!-- NOTE: A-Frame >= 1.4.0 automatically supports WebXR on compatible devices -->
     <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
 
-    <!-- NEW: MindAR World Tracking (for stable mobile camera access) -->
-    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+    <!-- REMOVED: MindAR -->
     
     <!-- FontAwesome for Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-
-    <!-- Firebase Imports REMOVED: Skipping multiplayer setup for now -->
     
     <style>
         /* Essential for full-screen AR experience */
@@ -29,7 +27,7 @@
             overflow: hidden;
         }
 
-        /* DOM Overlay allows UI to sit on top of the MindAR view */
+        /* DOM Overlay allows UI to sit on top of the WebXR view */
         #dom-overlay {
             position: absolute;
             top: 0; left: 0; width: 100%; height: 100%;
@@ -132,6 +130,11 @@
             box-shadow: 0 0 8px rgba(0,0,0,0.5);
             transition: width 0.2s, height 0.2s, background-color 0.2s;
         }
+        
+        /* Ensure A-Frame's button is hidden when we use our own */
+        .a-enter-ar-button {
+            display: none !important;
+        }
     </style>
 </head>
 <body class="bg-gray-900 overflow-hidden">
@@ -139,43 +142,45 @@
     <!-- Error/Feedback Message -->
     <div id="error-message" class="text-lg font-semibold">
         <h2 class="text-2xl mb-2"><i class="fas fa-exclamation-triangle mr-2"></i> AR Failed to Start</h2>
-        <p>Your browser is likely blocking the camera or doesn't support the required AR features.</p>
+        <p>
+            Your browser is either blocking necessary permissions or doesn't support the required AR standards. 
+            <br>
+            **Please check Camera AND Motion/Orientation Access in your iPhone Safari Settings.**
+        </p>
         <p class="mt-4">
-            Try refreshing the page and ensuring camera access is granted.
+            If you continue to see this error, your specific device may not support WebXR for this application.
         </p>
     </div>
 
     <!-- Start Screen Overlay -->
     <div id="start-screen">
-        <h1 class="text-4xl font-bold mb-4 bg-gradient-to-r from-blue-400 to-green-400 bg-clip-text text-transparent">AR Graffiti</h1>
-        <p class="mb-8 text-gray-300 max-w-md">Paint on the real world. <br> Requires camera and motion sensor access.</p>
+        <h1 class="text-4xl font-bold mb-4 bg-gradient-to-r from-blue-400 to-green-400 bg-clip-text text-transparent">AR Graffiti (WebXR)</h1>
+        <p class="mb-8 text-gray-300 max-w-md">Paint on the real world using native iOS AR features.</p>
         <button id="start-ar-btn" class="px-8 py-4 bg-blue-600 rounded-full font-bold text-xl shadow-lg hover:bg-blue-500 transition transform hover:scale-105">
             Start AR Session
         </button>
-        <p class="mt-8 text-xs text-gray-500">Note: Camera access is required to place virtual content in the real world.</p>
+        <p id="compatibility-check" class="mt-4 text-sm text-gray-400"></p>
+        <p class="mt-8 text-xs text-gray-500">Note: This will trigger a system-level permission request for Camera access.</p>
     </div>
 
-    <!-- A-Frame Scene (Using MindAR for initialization) -->
-    <!-- mindar-image handles the camera stream and AR initialization. autoStart: false means we trigger it with the button -->
+    <!-- A-Frame Scene (Using native WebXR for AR) -->
     <a-scene 
         id="ar-scene"
-        mindar-image="
-            imageTargetSrc: none; 
-            uiLoading: no; 
-            uiScanning: no; 
-            maxCanvasSize: 640;
-            facingMode: environment;
-            autoStart: false;" 
+        webxr="
+            requiredFeatures: [hit-test, local-floor]; 
+            optionalFeatures: [dom-overlay]; 
+            referenceSpaceType: local-floor;
+            overlay: #dom-overlay"
+        loading-screen="enabled: false"
         color-space="sRGB" 
-        renderer="antialias: true; colorManagement: true; physicallyCorrectLights: true;">
+        renderer="antialias: true; colorManagement: true; physicallyCorrectLights: true; alpha: true;">
 
-        <a-camera position="0 0 0" look-controls="enabled: true"></a-camera>
+        <!-- AR Mode Camera is handled by WebXR itself -->
+        <!-- The camera entity will automatically receive positioning from the WebXR session -->
+        <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
         
-        <!-- The anchor entity where all drawings will be attached (MindAR's world anchor) -->
-        <a-entity mindar-image-target="targetIndex: 0" id="wall-anchor">
-            <!-- The container for all drawings and the drawing component -->
-            <a-entity drawing-system></a-entity>
-        </a-entity>
+        <!-- The container for all drawings and the drawing component -->
+        <a-entity drawing-system id="drawing-container"></a-entity>
 
         <!-- Lighting for the spray particles -->
         <a-light type="ambient" color="#BBB"></a-light>
@@ -212,7 +217,7 @@
             </div>
         </div>
 
-        <!-- Center Reticle -->
+        <!-- Center Reticle (Used for placing graffiti) -->
         <div id="reticle"></div>
 
         <!-- Bottom Bar: Colors & Draw Button -->
@@ -246,60 +251,74 @@
             const startScreen = document.getElementById('start-screen');
             const overlay = document.getElementById('dom-overlay');
             const scene = document.querySelector('a-scene');
-
-            startBtn.addEventListener('click', async () => {
-                const mindarComponent = scene.components['mindar-image'];
-                let cameraSuccess = false;
-
-                // 1. CRITICAL: Start camera request immediately to satisfy iOS/Safari user gesture requirement
-                try {
+            const compatibilityText = document.getElementById('compatibility-check');
+            
+            // 1. Check WebXR Compatibility
+            if (window.navigator.xr) {
+                navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+                    if (supported) {
+                        compatibilityText.textContent = 'Device is WebXR compatible. Ready to start AR.';
+                        startBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                        startBtn.disabled = false;
+                    } else {
+                        compatibilityText.textContent = 'WebXR AR is not supported on this device/browser.';
+                        startBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                        startBtn.disabled = true;
+                    }
+                }).catch(() => {
+                    compatibilityText.textContent = 'Could not check WebXR compatibility.';
+                    startBtn.classList.add('opacity-50', 'cursor-not-allowed');
                     startBtn.disabled = true;
-                    startBtn.textContent = 'Requesting Camera...';
+                });
+            } else {
+                compatibilityText.textContent = 'WebXR API not found (iOS 13+ required).';
+                startBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                startBtn.disabled = true;
+            }
 
-                    // This must be triggered directly by the click/touch event.
-                    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-                    // Stop the tracks immediately, MindAR will handle the stream setup later
-                    stream.getTracks().forEach(track => track.stop()); 
-                    cameraSuccess = true;
-                    console.log("Camera access granted.");
-
-                } catch (e) {
-                    showStartupError(`Camera access denied or failed: ${e.message}. Please ensure your browser has camera permissions.`);
-                    startBtn.disabled = false;
-                    startBtn.textContent = 'Start AR Session';
-                    return;
-                }
-
-                if (!cameraSuccess) return;
-
-                // 2. INIT AR: Proceed directly to starting MindAR 
-                startBtn.textContent = 'Initializing AR...';
+            startBtn.addEventListener('click', () => {
+                // We use the A-Frame component method to enter AR mode, 
+                // which automatically handles the camera request (via the browser's UI).
+                const webxrComponent = scene.components.webxr;
                 
-                // Previously: await window.initFirebase(); 
-                
-                if (mindarComponent && mindarComponent.start) {
-                    // Start MindAR AR session 
-                    await mindarComponent.start();
+                if (webxrComponent && webxrComponent.enterAR) {
+                    startBtn.textContent = 'Starting AR...';
                     
-                    // 3. UI SWITCH: After successful AR start
+                    // This function is the standard A-Frame method to enter AR mode.
+                    webxrComponent.enterAR().then(() => {
+                        // AR session successfully started
+                        startScreen.style.display = 'none';
+                        overlay.style.visibility = 'visible';
+                    }).catch(e => {
+                        // This catches permission denials (camera, motion) or failed initialization
+                        let errorMsg = `AR startup failed: ${e.name || e.message}.`;
+                        if (e.name === 'NotAllowedError') {
+                            errorMsg += " Check iPhone Settings > Safari > Camera AND Motion/Orientation Access.";
+                        }
+                        showStartupError(errorMsg);
+                        startBtn.textContent = 'Start AR Session';
+                        startBtn.disabled = false;
+                    });
+                } else {
+                    showStartupError("WebXR component not ready or AR not supported.");
+                    startBtn.textContent = 'Start AR Session';
+                    startBtn.disabled = false;
+                }
+            });
+
+            // Listen for A-Frame's standard events to manage UI visibility
+            scene.addEventListener('enter-vr', (e) => {
+                if (e.detail.session.domOverlayState) {
+                    // Check if it's AR mode (immersive-ar)
                     startScreen.style.display = 'none';
                     overlay.style.visibility = 'visible';
-                } else {
-                    showStartupError("MindAR component not found or failed to initialize the AR system.");
-                    startBtn.disabled = false;
-                    startBtn.textContent = 'Start AR Session';
                 }
             });
-
-            // Listen for MindAR events to handle exit (optional, but good practice)
-            scene.addEventListener('arReady', () => {
-                console.log("MindAR AR session started successfully.");
-            });
             
-            scene.addEventListener('arError', (e) => {
-                showStartupError(`MindAR failed to start the AR session: ${e.detail}. This can happen if the browser environment (like some older Safaris) does not fully support the necessary APIs.`);
+            scene.addEventListener('exit-vr', () => {
                 startScreen.style.display = 'flex';
                 overlay.style.visibility = 'hidden';
+                startBtn.textContent = 'Start AR Session';
             });
         });
 
@@ -320,18 +339,14 @@
         AFRAME.registerComponent('drawing-system', {
             init: function () {
                 this.currentStroke = null;
-                this.strokeData = []; // Local stroke data (not used for saving right now)
+                this.strokeData = []; 
                 this.lastPoint = null;
-                this.reticlePosition = new THREE.Vector2(0, 0); // Center of screen
                 this.raycaster = new THREE.Raycaster();
-                
-                // Firestore Listener REMOVED
                 
                 // Input Handling
                 const btn = document.getElementById('draw-btn');
                 
                 const start = (e) => { 
-                    // Use preventDefault only if it's not a multi-touch
                     if(e.touches && e.touches.length > 1) return;
                     e.preventDefault(); 
                     this.startAction(); 
@@ -349,11 +364,10 @@
                 window.addEventListener('touchcancel', end); 
             },
 
-            // setupFirestore REMOVED
-
-            // remove REMOVED (no cleanup needed without firestore listener)
-
             startAction: function () {
+                // Only allow drawing if in AR mode
+                if (!this.el.sceneEl.is('ar-mode')) return;
+                
                 STATE.isDrawing = true;
                 this.strokeData = [];
                 this.lastPoint = null;
@@ -371,26 +385,24 @@
                 // Reset Button
                 document.getElementById('draw-btn').style.transform = "scale(1)";
                 document.getElementById('draw-btn').style.filter = "brightness(1)";
-
-                // Save to Firestore logic REMOVED
             },
 
             tick: function (time, deltaTime) {
-                if (!STATE.isDrawing) return;
+                if (!STATE.isDrawing || !this.el.sceneEl.is('ar-mode')) return;
 
                 const camera = this.el.sceneEl.camera;
                 if (!camera) return;
 
-                // 1. Get Hit Point (2 meters in front of camera)
+                // Use a simple forward projection for world placement
                 const point = this.getDrawingPosition(camera);
 
-                // 2. Handle Eraser
+                // Handle Eraser
                 if (STATE.tool === 'eraser') {
                     this.eraseAt(point);
                     return;
                 }
 
-                // 3. Handle Drawing (Brush or Spray)
+                // Handle Drawing (Brush or Spray)
                 const distanceThreshold = STATE.size * 0.3;
                 if (this.lastPoint && point.distanceTo(this.lastPoint) < distanceThreshold) {
                     return; // Too close to last point
@@ -407,27 +419,16 @@
             },
 
             getDrawingPosition: function(camera) {
-                // Creates a virtual drawing plane 1.5m away using raycasting from the center of the camera view
-                this.raycaster.setFromCamera(this.reticlePosition, camera);
-                
-                // Create an arbitrary plane 1.5m in front of the camera (simulating a target wall)
+                // Projects a point 1.5m in front of the camera using the camera's world direction
                 const direction = new THREE.Vector3();
                 camera.getWorldDirection(direction);
                 
-                const plane = new THREE.Plane(direction.negate(), 1.5); 
-                const intersectionPoint = new THREE.Vector3();
-
-                // If the ray intersects the plane, use that point. Otherwise, project 1.5m out.
-                if (this.raycaster.ray.intersectPlane(plane, intersectionPoint)) {
-                    return intersectionPoint;
-                } else {
-                    // Fallback: 1.5m directly in front of camera
-                    return camera.position.clone().add(direction.multiplyScalar(1.5).negate());
-                }
+                const worldPos = new THREE.Vector3();
+                worldPos.copy(camera.position).add(direction.multiplyScalar(1.5));
+                return worldPos;
             },
 
             drawBrushSegment: function(from, to, color, size) {
-                // Using cylinders for smoother thick lines than LineSegments
                 const distance = from.distanceTo(to);
                 if (distance === 0) return;
 
@@ -436,19 +437,17 @@
                     color: color, 
                     roughness: 1, 
                     flatShading: true,
-                    emissive: color, // Helps the color pop
+                    emissive: color, 
                     emissiveIntensity: 0.1
                 });
                 
                 const cylinder = new THREE.Mesh(geometry, material);
                 
-                // Align cylinder to the two points
                 const midPoint = new THREE.Vector3().addVectors(from, to).multiplyScalar(0.5);
                 cylinder.position.copy(midPoint);
                 cylinder.lookAt(to);
-                cylinder.rotateX(Math.PI / 2); // Cylinder geometry is typically aligned with Y axis
+                cylinder.rotateX(Math.PI / 2); 
                 
-                // Add sphere for joint smoothing (at the 'from' point)
                 const jointGeo = new THREE.SphereGeometry(size/2, 6, 6);
                 const joint = new THREE.Mesh(jointGeo, material);
                 joint.position.copy(from);
@@ -457,11 +456,9 @@
                 group.add(cylinder);
                 group.add(joint);
                 
-                // Tag for eraser
                 group.userData.isStroke = true;
                 
-                // Add to the anchor entity
-                document.getElementById('wall-anchor').object3D.add(group);
+                this.el.object3D.add(group);
             },
 
             drawSprayParticles: function(center, color, size) {
@@ -479,7 +476,6 @@
                 for(let i=0; i<particleCount; i++) {
                     const mesh = new THREE.Mesh(geometry, material);
                     
-                    // Random offset within sphere
                     const offset = new THREE.Vector3(
                         (Math.random() - 0.5) * sprayRadius,
                         (Math.random() - 0.5) * sprayRadius,
@@ -487,25 +483,21 @@
                     );
                     
                     mesh.position.copy(center).add(offset);
-                    // Make particles face the camera (billboarding)
                     mesh.lookAt(this.el.sceneEl.camera.position); 
                     mesh.userData.isStroke = true;
                     
-                    document.getElementById('wall-anchor').object3D.add(mesh);
+                    this.el.object3D.add(mesh);
                 }
             },
 
             eraseAt: function(point) {
-                // Simple distance-based erasure
                 const eraserRadius = STATE.size * 3;
-                const container = document.getElementById('wall-anchor').object3D;
+                const container = this.el.object3D;
                 const children = container.children;
                 
-                // Iterate backwards to safely remove
                 for (let i = children.length - 1; i >= 0; i--) {
                     const child = children[i];
                     if (child.userData.isStroke) {
-                        // Check distance to the group/mesh's world position
                         const childWorldPos = new THREE.Vector3();
                         child.getWorldPosition(childWorldPos);
                         
@@ -515,8 +507,6 @@
                     }
                 }
             },
-
-            // renderRemoteStroke REMOVED
         });
 
         // --- UI LOGIC ---
@@ -533,7 +523,6 @@
                     document.getElementById('reticle').style.borderColor = color;
                     document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
                     btn.classList.add('active');
-                    // Ensure reticle is visible/correct color on selection
                     if (STATE.tool !== 'eraser') {
                         document.getElementById('reticle').style.borderColor = color;
                     }
@@ -544,23 +533,20 @@
             // Size Slider
             document.getElementById('size-slider').addEventListener('input', (e) => {
                 STATE.size = parseFloat(e.target.value);
-                const px = 10 + (STATE.size * 500); // Scale 0.01-0.1 to 15px-60px
+                const px = 10 + (STATE.size * 500); 
                 const reticle = document.getElementById('reticle');
                 reticle.style.width = `${px}px`;
                 reticle.style.height = `${px}px`;
             });
-            // Trigger initial size update
             document.getElementById('size-slider').dispatchEvent(new Event('input'));
         }
 
         window.setTool = (toolName) => {
             STATE.tool = toolName;
             
-            // Update UI
             document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
             document.getElementById(`tool-${toolName}`).classList.add('active');
 
-            // Update Reticle Style
             const reticle = document.getElementById('reticle');
             if (toolName === 'eraser') {
                 reticle.style.borderStyle = 'dashed';
@@ -578,12 +564,10 @@
         };
 
         window.clearCanvas = () => {
-            // Use a custom confirmation message instead of alert/confirm
             const doClear = window.prompt("Type 'CLEAR' (in all caps) to confirm clearing your local graffiti:");
             
             if (doClear === 'CLEAR') {
-                const container = document.getElementById('wall-anchor');
-                const drawingEntity = container.querySelector('[drawing-system]');
+                const drawingEntity = document.getElementById('drawing-container');
                 
                 if (drawingEntity) {
                     const object3D = drawingEntity.object3D;
@@ -598,9 +582,8 @@
             }
         };
 
-        // Initialize
         initUI();
-        window.setTool('brush'); // Set initial tool appearance
+        window.setTool('brush');
 
     </script>
 </body>
