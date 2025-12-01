@@ -4,13 +4,17 @@
     <meta charset="UTF-8">
     <title>AR Graffiti Studio</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-    
-    <!-- Tailwind CSS -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+
+    <!-- Tailwind CSS (for quick styling) -->
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <!-- A-Frame (3D Framework) -->
+    <!-- A-Frame (3D/AR Framework) -->
     <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
 
+    <!-- NEW: MindAR World Tracking (for stable mobile camera access) -->
+    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+    
     <!-- FontAwesome for Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
@@ -25,17 +29,19 @@
         const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
         const authToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
+        // Expose Firebase functions globally
+        window.collection = collection;
+        window.addDoc = addDoc;
+        window.onSnapshot = onSnapshot;
+        window.query = query;
+        window.serverTimestamp = serverTimestamp;
+
         if (Object.keys(firebaseConfig).length > 0) {
             const app = initializeApp(firebaseConfig);
             window.db = getFirestore(app);
             window.auth = getAuth(app);
-            
-            // Expose Firestore functions to global scope for A-Frame component
-            window.collection = collection;
-            window.addDoc = addDoc;
-            window.onSnapshot = onSnapshot;
-            window.query = query;
-            window.serverTimestamp = serverTimestamp;
+        } else {
+            console.warn("Firebase config missing. Drawing will not sync.");
         }
 
         window.initFirebase = async () => {
@@ -54,11 +60,20 @@
                 
             } catch (error) { console.error("Auth error:", error); }
         };
-        window.initFirebase();
+        // We'll call this inside the main script when the AR session is about to start
+        // to ensure the user ID is available when the drawing system initializes.
     </script>
 
     <style>
-        /* DOM Overlay allows UI to sit on top of the WebXR view */
+        /* Essential for full-screen AR experience */
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        /* DOM Overlay allows UI to sit on top of the MindAR view */
         #dom-overlay {
             position: absolute;
             top: 0; left: 0; width: 100%; height: 100%;
@@ -83,6 +98,21 @@
             color: white;
             padding: 20px;
             text-align: center;
+        }
+        
+        #error-message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(185, 28, 28, 0.9); /* Red-900 */
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            max-width: 90%;
+            z-index: 100;
+            color: white;
+            display: none; /* Hidden by default */
         }
 
         /* Interactive elements inside the overlay must re-enable pointer-events */
@@ -150,28 +180,46 @@
 </head>
 <body class="bg-gray-900 overflow-hidden">
 
+    <!-- Error/Feedback Message -->
+    <div id="error-message" class="text-lg font-semibold">
+        <h2 class="text-2xl mb-2"><i class="fas fa-exclamation-triangle mr-2"></i> AR Failed to Start</h2>
+        <p>Your browser is likely blocking the camera or doesn't support the required AR features.</p>
+        <p class="mt-4">
+            Try refreshing the page and ensuring camera access is granted.
+        </p>
+    </div>
+
     <!-- Start Screen Overlay -->
     <div id="start-screen">
         <h1 class="text-4xl font-bold mb-4 bg-gradient-to-r from-blue-400 to-green-400 bg-clip-text text-transparent">AR Graffiti</h1>
-        <p class="mb-8 text-gray-300 max-w-md">Paint on the real world with friends. <br> Requires camera permissions and motion sensor access.</p>
+        <p class="mb-8 text-gray-300 max-w-md">Paint on the real world with friends. <br> Requires camera and motion sensor access.</p>
         <button id="start-ar-btn" class="px-8 py-4 bg-blue-600 rounded-full font-bold text-xl shadow-lg hover:bg-blue-500 transition transform hover:scale-105">
             Start AR Session
         </button>
-        <p class="mt-8 text-xs text-gray-500">Works best on Chrome Android or WebXR Viewer (iOS)</p>
+        <p class="mt-8 text-xs text-gray-500">Note: Camera access is required to place virtual content in the real world.</p>
     </div>
 
-    <!-- WebXR Scene -->
-    <!-- vr-mode-ui="enabled: false" hides the default button so we can use our custom start screen -->
+    <!-- A-Frame Scene (Using MindAR for initialization) -->
+    <!-- mindar-image handles the camera stream and AR initialization. autoStart: false means we trigger it with the button -->
     <a-scene 
-        vr-mode-ui="enabled: false"
-        webxr="optionalFeatures: hit-test, dom-overlay; overlayElement: #dom-overlay;"
-        background="color: #333; transparent: true"
+        id="ar-scene"
+        mindar-image="
+            imageTargetSrc: none; 
+            uiLoading: no; 
+            uiScanning: no; 
+            maxCanvasSize: 640;
+            facingMode: environment;
+            autoStart: false;" 
+        color-space="sRGB" 
         renderer="antialias: true; colorManagement: true; physicallyCorrectLights: true;">
 
-        <a-camera position="0 1.6 0" look-controls="enabled: true"></a-camera>
+        <a-camera position="0 0 0" look-controls="enabled: true"></a-camera>
         
-        <!-- The container for all drawings -->
-        <a-entity id="drawing-container" drawing-system></a-entity>
+        <!-- The anchor entity where all drawings will be attached (MindAR's world anchor) -->
+        <a-entity mindar-image-target="targetIndex: 0" id="wall-anchor">
+            <!-- The container for all drawings and the drawing component -->
+            <a-entity drawing-system></a-entity>
+        </a-entity>
 
         <!-- Lighting for the spray particles -->
         <a-light type="ambient" color="#BBB"></a-light>
@@ -227,33 +275,14 @@
     </div>
 
     <script>
-        /**
-         * Explicitly requests permission for DeviceOrientation (motion sensors), 
-         * required by Safari/iOS 13+ in secure contexts.
-         */
-        function requestMotionPermission() {
-            if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-                return DeviceOrientationEvent.requestPermission()
-                    .then(permissionState => {
-                        if (permissionState === 'granted') {
-                            console.log('Device motion permission granted.');
-                            return true;
-                        } else {
-                            // If denied, we still try to proceed, but AR tracking might be limited.
-                            console.warn('Device motion permission denied.');
-                            return false;
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Error requesting device motion permission:', error);
-                        return false;
-                    });
-            } else {
-                // Non-iOS device or older browser: permission is automatic or not required.
-                return Promise.resolve(true);
-            }
+        
+        function showStartupError(message) {
+            document.getElementById('start-screen').style.display = 'none';
+            const errorBox = document.getElementById('error-message');
+            errorBox.querySelector('p').innerHTML = message;
+            errorBox.style.display = 'block';
+            console.error(message);
         }
-
 
         // --- STARTUP LOGIC ---
         document.addEventListener('DOMContentLoaded', () => {
@@ -261,23 +290,51 @@
             const startScreen = document.getElementById('start-screen');
             const overlay = document.getElementById('dom-overlay');
             const scene = document.querySelector('a-scene');
+            const mindarComponent = scene.components['mindar-image'];
 
-            startBtn.addEventListener('click', () => {
-                // 1. Request motion sensor permission (needed for iOS tracking)
-                requestMotionPermission().finally(() => {
-                    // 2. Request to enter AR mode (triggers camera permission via WebXR)
-                    scene.enterVR(); 
-                });
+            startBtn.addEventListener('click', async () => {
+                // 1. Authenticate user
+                await window.initFirebase();
+                
+                // 2. Hide UI elements
+                startBtn.disabled = true;
+                startBtn.textContent = 'Starting...';
+
+                // 3. iOS Camera Fix: Force native camera request
+                try {
+                    // This explicitly triggers the camera permission prompt first.
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                    // Stop the tracks immediately, MindAR will handle the stream
+                    stream.getTracks().forEach(track => track.stop()); 
+                    console.log("Initial camera check successful.");
+                } catch (e) {
+                    showStartupError(`Camera access denied or failed: ${e.message}. Please ensure your browser has camera permissions.`);
+                    startBtn.disabled = false;
+                    startBtn.textContent = 'Start AR Session';
+                    return;
+                }
+
+                // 4. Start MindAR AR session
+                if (mindarComponent && mindarComponent.start) {
+                    await mindarComponent.start();
+                    
+                    // 5. Switch UI after successful start
+                    startScreen.style.display = 'none';
+                    overlay.style.visibility = 'visible';
+                } else {
+                    showStartupError("MindAR component not found or failed to initialize.");
+                    startBtn.disabled = false;
+                    startBtn.textContent = 'Start AR Session';
+                }
             });
 
-            // Listen for entering AR to switch UI
-            scene.addEventListener('enter-vr', () => {
-                startScreen.style.display = 'none';
-                overlay.style.visibility = 'visible';
+            // Listen for MindAR events to handle exit (optional, but good practice)
+            scene.addEventListener('arReady', () => {
+                console.log("MindAR AR session started successfully.");
             });
             
-            // Listen for exit to show start screen again (optional)
-            scene.addEventListener('exit-vr', () => {
+            scene.addEventListener('arError', (e) => {
+                showStartupError(`MindAR failed to start the AR session: ${e.detail}. This can happen if the browser environment (like some older Safaris) does not fully support the necessary APIs.`);
                 startScreen.style.display = 'flex';
                 overlay.style.visibility = 'hidden';
             });
@@ -294,7 +351,6 @@
             color: COLORS[0],
             size: 0.02,
             tool: 'brush', // brush, spray, eraser
-            userId: null
         };
 
         // --- DRAWING SYSTEM COMPONENT ---
@@ -303,6 +359,7 @@
                 this.currentStroke = null;
                 this.strokeData = [];
                 this.lastPoint = null;
+                this.reticlePosition = new THREE.Vector2(0, 0); // Center of screen
                 this.raycaster = new THREE.Raycaster();
                 
                 // Firestore Listener
@@ -314,8 +371,9 @@
                 const btn = document.getElementById('draw-btn');
                 
                 const start = (e) => { 
-                    e.preventDefault(); 
+                    // Use preventDefault only if it's not a multi-touch
                     if(e.touches && e.touches.length > 1) return;
+                    e.preventDefault(); 
                     this.startAction(); 
                 };
                 const end = (e) => { 
@@ -328,25 +386,33 @@
                 
                 window.addEventListener('mouseup', end);
                 window.addEventListener('touchend', end);
+                window.addEventListener('touchcancel', end); 
             },
 
             setupFirestore: function() {
                 if(!window.db || !window.DRAWING_COLLECTION_PATH) return;
                 
-                // Use window.* versions since the module scope isn't shared
                 const q = window.query(window.collection(window.db, window.DRAWING_COLLECTION_PATH));
-                window.onSnapshot(q, (snapshot) => {
+                this.unsubscribe = window.onSnapshot(q, (snapshot) => {
                     snapshot.docChanges().forEach((change) => {
                         if (change.type === "added") {
                             const data = change.doc.data();
                             // Don't redraw our own strokes immediately to avoid duplication 
-                            // (In a prod app you'd handle local/remote IDs better)
+                            // (We're relying on the tick() loop for local drawing)
                             if (data.userId !== window.userId) {
                                 this.renderRemoteStroke(data);
                             }
                         }
                     });
+                }, (error) => {
+                    console.error("Firestore sync error:", error);
                 });
+            },
+
+            remove: function() {
+                if (this.unsubscribe) {
+                    this.unsubscribe();
+                }
             },
 
             startAction: function () {
@@ -377,7 +443,6 @@
                         Number(v.z.toFixed(3))
                     ]);
 
-                    // Use global window.addDoc and window.collection
                     window.addDoc(window.collection(window.db, window.DRAWING_COLLECTION_PATH), {
                         userId: window.userId,
                         color: STATE.color,
@@ -385,6 +450,8 @@
                         tool: STATE.tool,
                         points: segments,
                         timestamp: window.serverTimestamp()
+                    }).catch(error => {
+                        console.error("Error saving drawing to Firestore:", error);
                     });
                 }
             },
@@ -396,7 +463,7 @@
                 if (!camera) return;
 
                 // 1. Get Hit Point (2 meters in front of camera)
-                const point = this.getHitPoint(camera);
+                const point = this.getDrawingPosition(camera);
 
                 // 2. Handle Eraser
                 if (STATE.tool === 'eraser') {
@@ -405,7 +472,8 @@
                 }
 
                 // 3. Handle Drawing (Brush or Spray)
-                if (this.lastPoint && point.distanceTo(this.lastPoint) < (STATE.size * 0.5)) {
+                const distanceThreshold = STATE.size * 0.3;
+                if (this.lastPoint && point.distanceTo(this.lastPoint) < distanceThreshold) {
                     return; // Too close to last point
                 }
 
@@ -419,12 +487,24 @@
                 this.lastPoint = point.clone();
             },
 
-            getHitPoint: function(camera) {
-                // Creates a virtual drawing plane 1.5m away
+            getDrawingPosition: function(camera) {
+                // Creates a virtual drawing plane 1.5m away using raycasting from the center of the camera view
+                this.raycaster.setFromCamera(this.reticlePosition, camera);
+                
+                // Create an arbitrary plane 1.5m in front of the camera (simulating a target wall)
                 const direction = new THREE.Vector3();
                 camera.getWorldDirection(direction);
-                direction.multiplyScalar(1.5); // Distance from phone
-                return camera.position.clone().add(direction);
+                
+                const plane = new THREE.Plane(direction.negate(), 1.5); 
+                const intersectionPoint = new THREE.Vector3();
+
+                // If the ray intersects the plane, use that point. Otherwise, project 1.5m out.
+                if (this.raycaster.ray.intersectPlane(plane, intersectionPoint)) {
+                    return intersectionPoint;
+                } else {
+                    // Fallback: 1.5m directly in front of camera
+                    return camera.position.clone().add(direction.multiplyScalar(1.5).negate());
+                }
             },
 
             drawBrushSegment: function(from, to, color, size) {
@@ -432,11 +512,13 @@
                 const distance = from.distanceTo(to);
                 if (distance === 0) return;
 
-                const geometry = new THREE.CylinderGeometry(size/2, size/2, distance, 6);
+                const geometry = new THREE.CylinderGeometry(size/2, size/2, distance, 6, 1, false);
                 const material = new THREE.MeshStandardMaterial({ 
                     color: color, 
                     roughness: 1, 
-                    flatShading: true 
+                    flatShading: true,
+                    emissive: color, // Helps the color pop
+                    emissiveIntensity: 0.1
                 });
                 
                 const cylinder = new THREE.Mesh(geometry, material);
@@ -445,9 +527,9 @@
                 const midPoint = new THREE.Vector3().addVectors(from, to).multiplyScalar(0.5);
                 cylinder.position.copy(midPoint);
                 cylinder.lookAt(to);
-                cylinder.rotateX(Math.PI / 2); // Cylinder creates pointing up, rotate to face target
+                cylinder.rotateX(Math.PI / 2); // Cylinder geometry is typically aligned with Y axis
                 
-                // Add sphere for joint smoothing
+                // Add sphere for joint smoothing (at the 'from' point)
                 const jointGeo = new THREE.SphereGeometry(size/2, 6, 6);
                 const joint = new THREE.Mesh(jointGeo, material);
                 joint.position.copy(from);
@@ -459,7 +541,8 @@
                 // Tag for eraser
                 group.userData.isStroke = true;
                 
-                this.el.object3D.add(group);
+                // Add to the anchor entity
+                document.getElementById('wall-anchor').object3D.add(group);
             },
 
             drawSprayParticles: function(center, color, size) {
@@ -485,32 +568,30 @@
                     );
                     
                     mesh.position.copy(center).add(offset);
-                    mesh.lookAt(this.el.sceneEl.camera.position); // Billboard effect
+                    // Make particles face the camera (billboarding)
+                    mesh.lookAt(this.el.sceneEl.camera.position); 
                     mesh.userData.isStroke = true;
                     
-                    this.el.object3D.add(mesh);
+                    document.getElementById('wall-anchor').object3D.add(mesh);
                 }
             },
 
             eraseAt: function(point) {
                 // Simple distance-based erasure
                 const eraserRadius = STATE.size * 3;
-                const children = this.el.object3D.children;
+                const container = document.getElementById('wall-anchor').object3D;
+                const children = container.children;
                 
                 // Iterate backwards to safely remove
                 for (let i = children.length - 1; i >= 0; i--) {
                     const child = children[i];
                     if (child.userData.isStroke) {
-                        // Check distance to the group or mesh
-                        if (child.position.distanceTo(point) < eraserRadius) {
-                            this.el.object3D.remove(child);
-                            // Also try to remove detailed children if it's a group
-                        } else if (child.children.length > 0) {
-                             // Check inner children (like the cylinder in the group)
-                             if (child.children[0].position.distanceTo(point) < eraserRadius || 
-                                 child.position.distanceTo(point) < eraserRadius) {
-                                 this.el.object3D.remove(child);
-                             }
+                        // Check distance to the group/mesh's world position
+                        const childWorldPos = new THREE.Vector3();
+                        child.getWorldPosition(childWorldPos);
+                        
+                        if (childWorldPos.distanceTo(point) < eraserRadius) {
+                            container.remove(child);
                         }
                     }
                 }
@@ -524,6 +605,7 @@
                 
                 if (data.tool === 'brush') {
                     for(let i=0; i<points.length-1; i++) {
+                        // Pass the previous point as 'from' for the cylinder creation
                         this.drawBrushSegment(points[i], points[i+1], data.color, data.size);
                     }
                 } else if (data.tool === 'spray') {
@@ -548,6 +630,10 @@
                     document.getElementById('reticle').style.borderColor = color;
                     document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
                     btn.classList.add('active');
+                    // Ensure reticle is visible/correct color on selection
+                    if (STATE.tool !== 'eraser') {
+                        document.getElementById('reticle').style.borderColor = color;
+                    }
                 };
                 palette.appendChild(btn);
             });
@@ -555,11 +641,13 @@
             // Size Slider
             document.getElementById('size-slider').addEventListener('input', (e) => {
                 STATE.size = parseFloat(e.target.value);
-                const px = 10 + (STATE.size * 500);
+                const px = 10 + (STATE.size * 500); // Scale 0.01-0.1 to 15px-60px
                 const reticle = document.getElementById('reticle');
                 reticle.style.width = `${px}px`;
                 reticle.style.height = `${px}px`;
             });
+            // Trigger initial size update
+            document.getElementById('size-slider').dispatchEvent(new Event('input'));
         }
 
         window.setTool = (toolName) => {
@@ -574,26 +662,39 @@
             if (toolName === 'eraser') {
                 reticle.style.borderStyle = 'dashed';
                 reticle.style.borderColor = 'white';
+                reticle.style.backgroundColor = 'transparent';
             } else if (toolName === 'spray') {
                 reticle.style.borderStyle = 'dotted';
                 reticle.style.borderColor = STATE.color;
-            } else {
+                reticle.style.backgroundColor = 'transparent';
+            } else { // brush
                 reticle.style.borderStyle = 'solid';
                 reticle.style.borderColor = STATE.color;
+                reticle.style.backgroundColor = 'transparent';
             }
         };
 
         window.clearCanvas = () => {
-            if(confirm("Clear your drawing?")) {
-                const container = document.getElementById('drawing-container');
-                while(container.object3D.children.length > 0){ 
-                    container.object3D.remove(container.object3D.children[0]); 
+            if(confirm("Clear ALL graffiti? This will only clear your local view. A full sync clear is not implemented in this version.")) {
+                const container = document.getElementById('wall-anchor');
+                // Loop through children of the drawing-system entity inside the anchor
+                const drawingEntity = container.querySelector('[drawing-system]');
+                
+                if (drawingEntity) {
+                    const object3D = drawingEntity.object3D;
+                    // Note: We only clear the 3D objects added by the component
+                    for (let i = object3D.children.length - 1; i >= 0; i--) {
+                        if (object3D.children[i].userData.isStroke) {
+                            object3D.remove(object3D.children[i]);
+                        }
+                    }
                 }
             }
         };
 
         // Initialize
         initUI();
+        window.setTool('brush'); // Set initial tool appearance
 
     </script>
 </body>
