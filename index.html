@@ -153,7 +153,7 @@
     <!-- Start Screen Overlay -->
     <div id="start-screen">
         <h1 class="text-4xl font-bold mb-4 bg-gradient-to-r from-blue-400 to-green-400 bg-clip-text text-transparent">AR Graffiti</h1>
-        <p class="mb-8 text-gray-300 max-w-md">Paint on the real world with friends. <br> Requires camera permissions.</p>
+        <p class="mb-8 text-gray-300 max-w-md">Paint on the real world with friends. <br> Requires camera permissions and motion sensor access.</p>
         <button id="start-ar-btn" class="px-8 py-4 bg-blue-600 rounded-full font-bold text-xl shadow-lg hover:bg-blue-500 transition transform hover:scale-105">
             Start AR Session
         </button>
@@ -227,6 +227,34 @@
     </div>
 
     <script>
+        /**
+         * Explicitly requests permission for DeviceOrientation (motion sensors), 
+         * required by Safari/iOS 13+ in secure contexts.
+         */
+        function requestMotionPermission() {
+            if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                return DeviceOrientationEvent.requestPermission()
+                    .then(permissionState => {
+                        if (permissionState === 'granted') {
+                            console.log('Device motion permission granted.');
+                            return true;
+                        } else {
+                            // If denied, we still try to proceed, but AR tracking might be limited.
+                            console.warn('Device motion permission denied.');
+                            return false;
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error requesting device motion permission:', error);
+                        return false;
+                    });
+            } else {
+                // Non-iOS device or older browser: permission is automatic or not required.
+                return Promise.resolve(true);
+            }
+        }
+
+
         // --- STARTUP LOGIC ---
         document.addEventListener('DOMContentLoaded', () => {
             const startBtn = document.getElementById('start-ar-btn');
@@ -235,10 +263,11 @@
             const scene = document.querySelector('a-scene');
 
             startBtn.addEventListener('click', () => {
-                // Request to enter AR mode
-                // This call requires a user gesture (click), which we are inside of.
-                // It triggers the permission prompt.
-                scene.enterVR(); 
+                // 1. Request motion sensor permission (needed for iOS tracking)
+                requestMotionPermission().finally(() => {
+                    // 2. Request to enter AR mode (triggers camera permission via WebXR)
+                    scene.enterVR(); 
+                });
             });
 
             // Listen for entering AR to switch UI
