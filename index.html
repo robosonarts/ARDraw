@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AR Studio Wall Painter</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+
+    <!-- Tailwind CSS (for quick styling) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- A-Frame (3D/AR Framework) -->
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+
+    <!-- MindAR World Tracking (for stable world-space positioning) -->
+    <!-- NOTE: We use MindAR's world tracking to handle the camera initialization and AR setup -->
+    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+    <!-- Firebase Imports (Auth and Firestore) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, onSnapshot, collection, query, where, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT: Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-ar-painter';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const authToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // 1. Initialize Firebase
+        if (Object.keys(firebaseConfig).length > 0) {
+            const app = initializeApp(firebaseConfig);
+            window.db = getFirestore(app);
+            window.auth = getAuth(app);
+            // setLogLevel('debug'); // Uncomment for debugging
+        } else {
+            console.error("Firebase configuration missing.");
+        }
+
+        // 2. Handle Authentication
+        window.initFirebase = async () => {
+            if (!window.auth) return;
+            try {
+                if (authToken) {
+                    await signInWithCustomToken(window.auth, authToken);
+                } else {
+                    await signInAnonymously(window.auth);
+                }
+
+                window.userId = window.auth.currentUser?.uid || crypto.randomUUID();
+                console.log("Firebase Auth complete. User ID:", window.userId);
+
+                // 3. Set up Firestore references and start drawing system
+                window.DRAWING_COLLECTION_PATH = `/artifacts/${appId}/public/data/drawings`;
+                document.querySelector('a-scene').setAttribute('drawing-system', 'enabled: true');
+
+            } catch (error) {
+                console.error("Firebase Auth or Init error:", error);
+            }
+        };
+
+        // Run authentication when the script loads
+        window.initFirebase();
+    </script>
+
+    <style>
+        /* Essential for full-screen AR experience */
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+        }
+
+        /* A-Frame Scene (must be visible and full-screen) */
+        #ar-scene {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Control Panel (UI) */
+        #controls {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            z-index: 100;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-around;
+            align-items: center;
+            backdrop-filter: blur(5px);
+            border-top-left-radius: 12px;
+            border-top-right-radius: 12px;
+            box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .color-button {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: 3px solid transparent;
+            cursor: pointer;
+            transition: transform 0.1s, border-color 0.2s;
+            margin: 4px;
+        }
+
+        .color-button.selected {
+            border-color: #3B82F6; /* Tailwind blue-500 */
+            transform: scale(1.1);
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.8);
+        }
+
+        /* Main Draw Button */
+        #draw-button {
+            padding: 15px 25px;
+            font-size: 18px;
+            font-weight: bold;
+            border-radius: 12px;
+            transition: background-color 0.1s, transform 0.1s, box-shadow 0.2s;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+            touch-action: manipulation; /* Important for mobile responsiveness */
+        }
+
+        /* Reticle for aiming */
+        #reticle {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            border: 2px solid white;
+            transform: translate(-50%, -50%);
+            z-index: 90;
+            opacity: 0.8;
+            pointer-events: none;
+            box-shadow: 0 0 5px white;
+        }
+
+        /* Start Screen Overlay */
+        #start-screen {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.95);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            z-index: 200;
+            color: white;
+            text-align: center;
+            padding: 20px;
+        }
+        #start-button {
+            padding: 15px 30px;
+            font-size: 20px;
+            background: #10B981; /* Tailwind emerald-500 */
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-top: 20px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+            transition: background 0.3s, transform 0.1s;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Start Screen Overlay -->
+    <div id="start-screen">
+        <h1 class="text-3xl font-bold mb-4">AR Studio Wall Painter</h1>
+        <p class="text-lg mb-6">Point your camera at a wall to begin drawing. The drawing position is based on the center of your screen.</p>
+        <p class="text-sm mb-8">This experience requires camera access and is shared in real-time with other users!</p>
+        <button id="start-button">Start AR Experience</button>
+    </div>
+
+    <!-- The Aiming Reticle -->
+    <div id="reticle" style="background-color: white;"></div>
+
+    <!-- The A-Frame / AR Scene -->
+    <!-- We use mindar-image (which supports world tracking) for reliable mobile camera access -->
+    <a-scene 
+        id="ar-scene"
+        mindar-image="
+            imageTargetSrc: none; 
+            uiLoading: no; 
+            uiScanning: no; 
+            maxCanvasSize: 640;
+            facingMode: environment;
+            autoStart: false;" 
+        color-space="sRGB" 
+        renderer="antialias: true, logarithmicDepthBuffer: true, colorManagement: true, physicallyCorrectLights: true" 
+        vr-mode-ui="enabled: false" 
+        device-orientation-permission-ui="enabled: false">
+
+        <!-- The camera will automatically track the world position -->
+        <a-camera position="0 0 0" look-controls="enabled: true"></a-camera>
+
+        <!-- The anchor entity where all drawings will be attached (acts as the virtual wall) -->
+        <a-entity mindar-world="anchor: true;" id="wall-anchor">
+            <!-- This is where the custom component runs the drawing and syncs data -->
+            <a-entity drawing-system="enabled: false"></a-entity>
+        </a-entity>
+    </a-scene>
+
+    <!-- UI Controls -->
+    <div id="controls">
+        <!-- Color Palette -->
+        <div class="flex items-center space-x-2 p-2">
+            <button class="color-button selected" style="background-color: #EF4444;" data-color="#EF4444" data-name="red"></button>
+            <button class="color-button" style="background-color: #3B82F6;" data-color="#3B82F6" data-name="blue"></button>
+            <button class="color-button" style="background-color: #FACC15;" data-color="#FACC15" data-name="yellow"></button>
+            <button class="color-button" style="background-color: #000000;" data-color="#000000" data-name="black"></button>
+            <button class="color-button" style="background-color: #FFFFFF; border: 1px solid #ccc;" data-color="#FFFFFF" data-name="white"></button>
+        </div>
+
+        <!-- Brush Size Slider -->
+        <div class="flex flex-col items-center p-2">
+            <label for="size-slider" class="text-white text-xs mb-1">Brush Size</label>
+            <input type="range" id="size-slider" min="0.005" max="0.05" step="0.005" value="0.015" class="w-24">
+        </div>
+
+        <!-- Draw Button -->
+        <button id="draw-button" class="bg-gray-400 text-white">Hold to Draw</button>
+    </div>
+
+    <script>
+        // --- A-FRAME DRAWING SYSTEM COMPONENT ---
+        AFRAME.registerComponent('drawing-system', {
+            schema: {
+                enabled: { type: 'boolean', default: false },
+                color: { type: 'string', default: '#EF4444' }, // Red (default)
+                size: { type: 'number', default: 0.015 }, // Medium size
+            },
+
+            init: function () {
+                this.isDrawing = false;
+                this.currentLine = null; // THREE.Line object for the current stroke
+                this.drawingData = []; // Array of {from, to, color, size} for the current line
+                this.lastCameraPos = new THREE.Vector3(); // Last known camera position
+                this.reticle = document.getElementById('reticle');
+
+                // --- 1. Firestore Realtime Listener ---
+                if (window.db && window.DRAWING_COLLECTION_PATH) {
+                    const q = query(collection(window.db, window.DRAWING_COLLECTION_PATH));
+                    this.unsubscribe = onSnapshot(q, (snapshot) => {
+                        snapshot.docChanges().forEach((change) => {
+                            const data = change.doc.data();
+                            if (change.type === "added" && data.segments) {
+                                // Draw a new line received from the database
+                                this.drawRemoteLine(data.segments, data.color, data.size);
+                            }
+                            // Note: We currently only sync additions, not updates or deletions.
+                        });
+                        console.log("Firestore sync complete.");
+                    }, (error) => {
+                        console.error("Firestore Listener Error:", error);
+                    });
+                }
+
+                // Event listener to start drawing (on touch/mouse down)
+                this.startDraw = this.startDraw.bind(this);
+                this.stopDraw = this.stopDraw.bind(this);
+
+                const drawButton = document.getElementById('draw-button');
+                drawButton.addEventListener('mousedown', this.startDraw);
+                drawButton.addEventListener('touchstart', this.startDraw);
+                drawButton.addEventListener('mouseup', this.stopDraw);
+                drawButton.addEventListener('touchend', this.stopDraw);
+                drawButton.addEventListener('touchcancel', this.stopDraw); 
+            },
+
+            remove: function() {
+                // Clean up Firestore listener on component removal
+                if (this.unsubscribe) {
+                    this.unsubscribe();
+                }
+            },
+
+            startDraw: function (e) {
+                if (!this.data.enabled) return;
+                // Prevent multi-touch drawing
+                if (e.touches && e.touches.length > 1) return; 
+
+                this.isDrawing = true;
+                this.drawingData = [];
+
+                // Change button style to indicate drawing
+                const drawButton = document.getElementById('draw-button');
+                drawButton.classList.remove('bg-gray-400', 'text-white');
+                drawButton.classList.add('bg-red-600', 'text-white');
+
+                // Get initial position and start the line
+                const camera = this.el.sceneEl.camera;
+                const intersectionPoint = this.getDrawingPosition(camera);
+                this.lastCameraPos.copy(intersectionPoint);
+            },
+
+            stopDraw: function () {
+                if (!this.isDrawing) return;
+                this.isDrawing = false;
+
+                // Change button style back
+                const drawButton = document.getElementById('draw-button');
+                drawButton.classList.add('bg-gray-400', 'text-white');
+                drawButton.classList.remove('bg-red-600', 'text-white');
+
+                // --- 2. Save Data to Firestore ---
+                if (window.db && window.DRAWING_COLLECTION_PATH && this.drawingData.length > 0) {
+                    const segmentsToSave = this.drawingData.map(d => ({
+                        f: [d.from.x, d.from.y, d.from.z], // 'f' for from
+                        t: [d.to.x, d.to.y, d.to.z]       // 't' for to
+                    }));
+
+                    try {
+                        addDoc(collection(window.db, window.DRAWING_COLLECTION_PATH), {
+                            userId: window.userId,
+                            color: this.data.color,
+                            size: this.data.size,
+                            segments: segmentsToSave,
+                            timestamp: serverTimestamp()
+                        }).then(() => {
+                            console.log("Line segment saved successfully.");
+                        });
+                    } catch (e) {
+                        console.error("Error adding document: ", e);
+                    }
+                }
+
+                // Clear the current line state for the next stroke
+                this.currentLine = null;
+                this.drawingData = [];
+            },
+
+            // Calculates the 3D point where the center of the camera is aiming
+            getDrawingPosition: function (camera) {
+                const raycaster = new THREE.Raycaster();
+                const mouse = new THREE.Vector2(0, 0); // Center of screen is (0, 0) in normalized device coordinates
+
+                raycaster.setFromCamera(mouse, camera);
+
+                // Use an arbitrary plane fixed in front of the camera (e.g., 2 units away)
+                // This creates the illusion of drawing on a distant wall.
+                const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -2); 
+                const intersectionPoint = new THREE.Vector3();
+
+                raycaster.ray.intersectPlane(plane, intersectionPoint);
+                return intersectionPoint;
+            },
+
+            // Draws the received line on the AR scene
+            drawRemoteLine: function (segments, color, size) {
+                if (segments.length === 0) return;
+
+                const geometry = new THREE.BufferGeometry();
+                const material = new THREE.MeshBasicMaterial({ color: new THREE.Color(color) });
+
+                const points = [];
+                segments.forEach(seg => {
+                    const from = new THREE.Vector3(seg.f[0], seg.f[1], seg.f[2]);
+                    const to = new THREE.Vector3(seg.t[0], seg.t[1], seg.t[2]);
+                    points.push(from, to); // Add two points for a segment
+                });
+
+                geometry.setFromPoints(points);
+
+                // Use LineSegments and apply size via LineMaterial (approximation here, for simplicity, using a cylinder mesh is better)
+                // For performance, we'll use a simple THREE.LineSegments, but scale its thickness
+                const line = new THREE.LineSegments(geometry, material);
+
+                // Add to the scene's anchor point so it stays fixed in the world
+                document.querySelector('#wall-anchor').object3D.add(line); 
+                line.userData.segments = segments; // Store the raw data
+                line.userData.size = size;
+                line.userData.color = color;
+
+                // Simple size approximation using Scale
+                line.scale.set(size * 10, size * 10, size * 10);
+            },
+
+            tick: function (time, deltaTime) {
+                if (!this.data.enabled || !this.isDrawing) return;
+
+                const camera = this.el.sceneEl.camera;
+                if (!camera) return;
+
+                const newCameraPos = this.getDrawingPosition(camera);
+
+                // Only draw a segment if the camera has moved significantly
+                const minDistance = 0.01 * this.data.size; // Movement threshold scales with brush size
+                if (newCameraPos.distanceTo(this.lastCameraPos) > minDistance) {
+                    // Create a new segment
+                    const segment = {
+                        from: this.lastCameraPos.clone(),
+                        to: newCameraPos.clone(),
+                        color: this.data.color,
+                        size: this.data.size
+                    };
+
+                    this.drawingData.push(segment);
+
+                    // Visualize the segment immediately
+                    this.drawLocalSegment(segment);
+
+                    // Update the last position for the next tick
+                    this.lastCameraPos.copy(newCameraPos);
+                }
+            },
+
+            // Function to draw one line segment locally using THREE.js
+            drawLocalSegment: function (segment) {
+                const points = [segment.from, segment.to];
+                const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                const material = new THREE.LineBasicMaterial({ 
+                    color: segment.color, 
+                    linewidth: segment.size * 1000, // Line width is difficult in THREE.js without LineMaterial, this is a proxy
+                    linecap: 'round', // Ignored by LineBasicMaterial, but good intent
+                    linejoin: 'round'
+                });
+
+                // Create a basic line
+                const line = new THREE.Line(geometry, material);
+
+                // Create a simple sphere at the 'to' point to simulate brush size/end cap
+                const sphereGeometry = new THREE.SphereGeometry(segment.size / 2, 8, 8);
+                const sphereMaterial = new THREE.MeshBasicMaterial({ color: segment.color });
+                const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+                sphere.position.copy(segment.to);
+
+                // Add to the scene's anchor point
+                document.querySelector('#wall-anchor').object3D.add(line);
+                document.querySelector('#wall-anchor').object3D.add(sphere);
+            }
+        });
+
+
+        // --- UI & Initialization Logic ---
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const startButton = document.getElementById('start-button');
+            const startScreen = document.getElementById('start-screen');
+            const sceneEl = document.querySelector('a-scene');
+            const drawButton = document.getElementById('draw-button');
+            const colorButtons = document.querySelectorAll('.color-button');
+            const sizeSlider = document.getElementById('size-slider');
+            const drawingSystem = sceneEl.components['drawing-system'];
+
+            const mindarComponent = sceneEl.components['mindar-image'];
+
+            // 1. Start AR Experience
+            startButton.addEventListener('click', async () => {
+                startScreen.style.display = 'none';
+
+                try {
+                    // Force native camera request for iOS stability (as we learned)
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                    stream.getTracks().forEach(track => track.stop()); 
+
+                    // Start MindAR world tracking and enable drawing system
+                    if (mindarComponent && mindarComponent.start) {
+                        await mindarComponent.start();
+                        drawingSystem.data.enabled = true;
+                        console.log("AR experience started.");
+                    }
+
+                } catch (err) {
+                    console.error("Camera/AR Initialization Failed:", err);
+                    alert("AR Error: Camera access failed. Please ensure permissions are granted.");
+                }
+            });
+
+            // 2. Color Selection
+            colorButtons.forEach(button => {
+                button.addEventListener('click', () => {
+                    // Update component state
+                    const newColor = button.getAttribute('data-color');
+                    drawingSystem.data.color = newColor;
+                    drawingSystem.el.setAttribute('drawing-system', 'color', newColor);
+
+                    // Update reticle color
+                    document.getElementById('reticle').style.backgroundColor = newColor;
+
+                    // Update UI selection
+                    colorButtons.forEach(btn => btn.classList.remove('selected'));
+                    button.classList.add('selected');
+                });
+            });
+
+            // 3. Size Slider
+            sizeSlider.addEventListener('input', (e) => {
+                const newSize = parseFloat(e.target.value);
+                drawingSystem.data.size = newSize;
+                drawingSystem.el.setAttribute('drawing-system', 'size', newSize);
+
+                // Update reticle size to match
+                const reticleSize = 10 + (newSize / 0.05) * 10; // Simple scaling
+                document.getElementById('reticle').style.width = `${reticleSize}px`;
+                document.getElementById('reticle').style.height = `${reticleSize}px`;
+            });
+
+            // Initial reticle setup
+            document.getElementById('reticle').style.backgroundColor = drawingSystem.data.color;
+            sizeSlider.dispatchEvent(new Event('input')); // Trigger initial size update
+        });
+    </script>
+</body>
+</html>
